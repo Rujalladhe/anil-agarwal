@@ -1,0 +1,23 @@
+{
+  "name": "resume-scorer-backend",
+  "version": "1.0.0",
+  "description": "Local backend for Resume Scorer Chrome extension. Extracts text from PDF/DOCX resumes and scores them via an AI provider (Groq / Anthropic / Gemini).",
+  "private": true,
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "dev": "node --watch server.js",
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "^3.0.0",
+    "better-sqlite3": "^11.5.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "exceljs": "^4.4.0",
+    "express": "^4.19.2",
+    "mammoth": "^1.8.0",
+    "pdf-parse": "^1.1.1",
+    "sqlite-vec": "^0.1.6"
+  }
+}

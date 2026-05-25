@@ -1,0 +1,324 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Resume Scorer · Dashboard</title>
+  <link rel="stylesheet" href="dashboard.css" />
+  <link rel="preconnect" href="https://cdn.jsdelivr.net" />
+  <script defer src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+  <script defer type="module" src="dashboard.js"></script>
+</head>
+<body>
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-mark">RS</div>
+      <div>
+        <div class="brand-title">Resume Scorer</div>
+        <div class="brand-sub">Recruiter dashboard</div>
+      </div>
+    </div>
+
+    <nav class="nav">
+      <button class="nav-btn active" data-view="overview">
+        <span class="ico">●</span>Overview
+      </button>
+      <button class="nav-btn" data-view="candidates">
+        <span class="ico">▤</span>Candidates
+      </button>
+      <button class="nav-btn" data-view="match">
+        <span class="ico">◇</span>JD Match
+      </button>
+      <button class="nav-btn" data-view="chat">
+        <span class="ico">◆</span>AI Chat
+      </button>
+      <button class="nav-btn" data-view="settings">
+        <span class="ico">⚙</span>Settings
+      </button>
+    </nav>
+
+    <div class="side-footer">
+      <div class="health" id="healthBox">
+        <span class="dot pending"></span>
+        <span class="health-text">checking…</span>
+      </div>
+    </div>
+  </aside>
+
+  <main class="main">
+    <header class="topbar">
+      <div>
+        <h1 id="viewTitle">Overview</h1>
+        <p id="viewSubtitle" class="muted">At-a-glance metrics across every scored resume.</p>
+      </div>
+      <div class="topbar-actions">
+        <button id="refreshBtn" class="btn ghost" title="Reload data">↻ Refresh</button>
+        <button id="exportBtn" class="btn primary" title="Download all candidates as Excel">⬇ Export Excel</button>
+      </div>
+    </header>
+
+    <!-- ===================== OVERVIEW VIEW ===================== -->
+    <section class="view" data-view="overview">
+      <div class="kpi-grid">
+        <div class="kpi">
+          <div class="kpi-label">Total resumes</div>
+          <div class="kpi-value" id="kpiTotal">—</div>
+          <div class="kpi-sub" id="kpiTotalSub">across all categories</div>
+        </div>
+        <div class="kpi">
+          <div class="kpi-label">Average score</div>
+          <div class="kpi-value" id="kpiAvg">—</div>
+          <div class="kpi-sub" id="kpiAvgSub">out of 100</div>
+        </div>
+        <div class="kpi">
+          <div class="kpi-label">Top categories</div>
+          <div class="kpi-value" id="kpiCat">—</div>
+          <div class="kpi-sub" id="kpiCatSub"></div>
+        </div>
+        <div class="kpi">
+          <div class="kpi-label">Strong matches</div>
+          <div class="kpi-value" id="kpiGood">—</div>
+          <div class="kpi-sub">score ≥ 75</div>
+        </div>
+      </div>
+
+      <div class="charts-grid">
+        <div class="card chart-card">
+          <div class="card-head">
+            <h3>Resumes by category</h3>
+            <span class="muted small">Where your pipeline sits</span>
+          </div>
+          <div class="chart-wrap"><canvas id="chartCategory"></canvas></div>
+        </div>
+
+        <div class="card chart-card">
+          <div class="card-head">
+            <h3>Score distribution</h3>
+            <span class="muted small">10-point buckets</span>
+          </div>
+          <div class="chart-wrap"><canvas id="chartScores"></canvas></div>
+        </div>
+
+        <div class="card chart-card">
+          <div class="card-head">
+            <h3>Match quality</h3>
+            <span class="muted small">Good · Mid · Low bands</span>
+          </div>
+          <div class="chart-wrap"><canvas id="chartBands"></canvas></div>
+        </div>
+
+        <div class="card chart-card wide">
+          <div class="card-head">
+            <h3>Inflow — last 14 days</h3>
+            <span class="muted small">Resumes scored per day</span>
+          </div>
+          <div class="chart-wrap"><canvas id="chartTimeline"></canvas></div>
+        </div>
+
+        <div class="card chart-card">
+          <div class="card-head">
+            <h3>Avg breakdown</h3>
+            <span class="muted small">Where candidates excel / lag</span>
+          </div>
+          <div class="chart-wrap"><canvas id="chartBreakdown"></canvas></div>
+        </div>
+
+        <div class="card chart-card">
+          <div class="card-head">
+            <h3>Years of experience</h3>
+            <span class="muted small">Seniority spread</span>
+          </div>
+          <div class="chart-wrap"><canvas id="chartYears"></canvas></div>
+        </div>
+      </div>
+
+      <div class="two-col">
+        <div class="card">
+          <div class="card-head">
+            <h3>Top skills in pipeline</h3>
+            <span class="muted small">By frequency</span>
+          </div>
+          <div id="topSkills" class="skill-chips"></div>
+        </div>
+        <div class="card">
+          <div class="card-head">
+            <h3>Recently scored</h3>
+            <span class="muted small">Latest 8</span>
+          </div>
+          <ul id="recentList" class="recent"></ul>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================== CANDIDATES VIEW ===================== -->
+    <section class="view hidden" data-view="candidates">
+      <div class="card">
+        <div class="filters">
+          <input id="searchInput" type="search" placeholder="Search name, skill, role, company…" />
+          <select id="categoryFilter">
+            <option value="">All categories</option>
+          </select>
+          <select id="minScoreFilter">
+            <option value="">Any score</option>
+            <option value="50">≥ 50</option>
+            <option value="65">≥ 65</option>
+            <option value="75">≥ 75</option>
+            <option value="85">≥ 85</option>
+          </select>
+          <select id="minYearsFilter">
+            <option value="">Any experience</option>
+            <option value="0">Fresh grad (0+)</option>
+            <option value="1">1+ years</option>
+            <option value="2">2+ years</option>
+            <option value="5">5+ years</option>
+            <option value="8">8+ years</option>
+          </select>
+          <button id="applyFiltersBtn" class="btn primary">Apply</button>
+          <button id="clearFiltersBtn" class="btn ghost">Clear</button>
+        </div>
+        <div id="candidatesStatus" class="muted small candidates-status"></div>
+        <div class="table-wrap">
+          <table class="candidates-table">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Candidate</th>
+                <th>Role / Title</th>
+                <th>Category</th>
+                <th>Yrs</th>
+                <th>Skills</th>
+                <th>Score</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="candidatesBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================== JD MATCH VIEW ===================== -->
+    <section class="view hidden" data-view="match">
+      <div class="card match-card">
+        <div class="card-head">
+          <h3>Paste a job description</h3>
+          <span class="muted small">We'll rank your candidates by semantic fit and explain each one.</span>
+        </div>
+        <textarea
+          id="jdInput"
+          class="jd-input"
+          rows="9"
+          placeholder="e.g. Senior Backend Engineer — 4+ years building Node.js / TypeScript services on AWS. Strong SQL, Postgres, GraphQL. Bonus: experience with event-driven architectures, Kubernetes, or LLM-powered products."
+        ></textarea>
+        <div class="match-controls">
+          <label class="match-control">
+            Top
+            <select id="jdTopK">
+              <option value="3">3</option>
+              <option value="5" selected>5</option>
+              <option value="10">10</option>
+            </select>
+            candidates
+          </label>
+          <label class="match-control">
+            <input id="jdReasons" type="checkbox" checked />
+            Generate AI reasons
+          </label>
+          <span class="muted small" style="flex:1;"></span>
+          <button id="jdClearBtn" class="btn ghost">Clear</button>
+          <button id="jdRunBtn" class="btn primary">Find matches</button>
+        </div>
+      </div>
+
+      <div id="jdStatus" class="muted small jd-status"></div>
+      <div id="jdResults" class="jd-results"></div>
+    </section>
+
+    <!-- ===================== CHAT VIEW ===================== -->
+    <section class="view hidden chat-view" data-view="chat">
+      <div class="chat-shell">
+        <aside class="chat-sidebar">
+          <div class="chat-side-head">
+            <h3>Conversations</h3>
+            <button id="newThreadBtn" class="btn primary small">＋ New</button>
+          </div>
+          <div class="thread-mode-toggle">
+            <label class="mode-radio">
+              <input type="radio" name="chatMode" value="all" checked />
+              <span>All resumes</span>
+            </label>
+            <label class="mode-radio">
+              <input type="radio" name="chatMode" value="one" />
+              <span>One resume</span>
+            </label>
+          </div>
+          <select id="resumePicker" class="hidden">
+            <option value="">— pick a resume —</option>
+          </select>
+          <ul id="threadList" class="thread-list"></ul>
+        </aside>
+
+        <section class="chat-main">
+          <div id="chatHeader" class="chat-header">
+            <div>
+              <div id="chatTitle" class="chat-title">New conversation</div>
+              <div id="chatScope" class="muted small">Cross-resume mode</div>
+            </div>
+          </div>
+          <div id="chatMessages" class="chat-messages">
+            <div class="empty-chat">
+              <h2>Ask anything about your candidates</h2>
+              <p>Examples — click to try:</p>
+              <div class="prompt-chips">
+                <button class="prompt-chip">Show me backend developers with 2+ years of experience</button>
+                <button class="prompt-chip">Segregate frontend devs with strong React experience</button>
+                <button class="prompt-chip">Who's the best fit for an entry-level data analyst role?</button>
+                <button class="prompt-chip">List candidates with ML or AI experience</button>
+                <button class="prompt-chip">Rank the top 5 backend candidates and tell me why</button>
+                <button class="prompt-chip">Anyone willing to start immediately (notice period &lt; 30 days)?</button>
+              </div>
+            </div>
+          </div>
+          <form id="chatForm" class="chat-input-row">
+            <textarea id="chatInput" placeholder="Ask the AI about your candidates…" rows="1"></textarea>
+            <button type="submit" class="btn primary" id="chatSendBtn">Send</button>
+          </form>
+        </section>
+      </div>
+    </section>
+
+    <!-- ===================== SETTINGS VIEW ===================== -->
+    <section class="view hidden" data-view="settings">
+      <div class="card">
+        <div class="card-head"><h3>Backend</h3></div>
+        <div class="kv" id="backendInfo">loading…</div>
+      </div>
+      <div class="card">
+        <div class="card-head"><h3>Chrome extension</h3></div>
+        <p class="muted">Install the Chrome extension from <code>extension/</code> to pull resume attachments directly from Outlook. Scored resumes will show up here automatically.</p>
+        <p class="muted">All AI calls happen server-side — no API keys live in the extension.</p>
+      </div>
+      <div class="card">
+        <div class="card-head"><h3>Tips for saving tokens</h3></div>
+        <ul class="muted">
+          <li>Summarize buttons reuse the cached <code>review.summary</code> from the first score — repeat clicks are free.</li>
+          <li>Filter queries like "backend devs with 2+ years" are answered with structured SQL before any AI call.</li>
+          <li>Embeddings run locally (Transformers.js), so semantic search is free and offline.</li>
+          <li>Re-scoring a previously-seen email attachment is deduped by <code>(email_id, attachment_id)</code>.</li>
+        </ul>
+      </div>
+    </section>
+
+    <div id="toast" class="toast hidden"></div>
+  </main>
+
+  <!-- candidate detail modal -->
+  <div id="modal" class="modal hidden">
+    <div class="modal-backdrop"></div>
+    <div class="modal-card">
+      <button id="modalClose" class="modal-close">×</button>
+      <div id="modalBody"></div>
+    </div>
+  </div>
+</body>
+</html>

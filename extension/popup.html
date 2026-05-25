@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Resume Scorer</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <img src="icons/icon48.png" alt="" width="24" height="24" />
+      <span>Resume Scorer</span>
+    </div>
+    <div class="actions">
+      <button id="openDashboardBtn" class="link-btn" title="Open the full dashboard in a new tab">Dashboard ↗</button>
+      <button id="signOutBtn" class="link-btn hidden" title="Sign out">Sign out</button>
+    </div>
+  </header>
+
+  <section id="authPanel" class="panel">
+    <p class="muted">Connect your Outlook account to scan recent emails for resume attachments (PDF / DOCX) and score them with AI.</p>
+    <button id="connectBtn" class="primary">Connect Outlook</button>
+    <p id="authError" class="error hidden"></p>
+  </section>
+
+  <section id="mainPanel" class="panel hidden">
+    <div class="tabs">
+      <button class="tab active" data-tab="inbox">Inbox</button>
+      <button class="tab" data-tab="rankings">Rankings</button>
+    </div>
+
+    <div id="tab-inbox" class="tab-pane">
+      <div class="row">
+        <button id="refreshBtn" class="secondary">Refresh inbox</button>
+        <span id="statusLine" class="muted small"></span>
+      </div>
+
+      <div id="resumeList" class="list" aria-live="polite">
+        <!-- resume cards injected here -->
+      </div>
+    </div>
+
+    <div id="tab-rankings" class="tab-pane hidden">
+      <div class="row">
+        <button id="refreshRankingsBtn" class="secondary">Refresh rankings</button>
+        <button id="downloadXlsxBtn" class="secondary" title="Download all scored candidates as an Excel sheet">Download Excel</button>
+        <span id="rankingsStatus" class="muted small"></span>
+      </div>
+      <div id="rankingsList" class="rankings" aria-live="polite">
+        <!-- category groups injected here -->
+      </div>
+    </div>
+
+    <div id="resultPanel" class="result hidden">
+      <h3 id="resultTitle">Score</h3>
+
+      <div class="score-row">
+        <div class="score-circle" id="scoreCircle">
+          <span id="scoreNumber">--</span>
+        </div>
+        <div class="score-meta">
+          <div id="scoreFilename" class="filename"></div>
+          <div id="scoreFrom" class="muted small"></div>
+          <div class="result-tags">
+            <span id="scoreCategory" class="badge badge-cat hidden"></span>
+            <span id="scoreRoleTitle" class="muted small"></span>
+          </div>
+        </div>
+      </div>
+
+      <div class="breakdown" id="breakdown"></div>
+
+      <h4>Summary</h4>
+      <p id="summary" class="summary"></p>
+
+      <div class="cols">
+        <div>
+          <h4>Strengths</h4>
+          <ul id="strengths"></ul>
+        </div>
+        <div>
+          <h4>Concerns</h4>
+          <ul id="concerns"></ul>
+        </div>
+      </div>
+
+      <h4>Recommendations</h4>
+      <ul id="recommendations"></ul>
+    </div>
+
+    <div id="loading" class="loading hidden">
+      <div class="spinner"></div>
+      <span id="loadingText">Working…</span>
+    </div>
+
+    <p id="mainError" class="error hidden"></p>
+  </section>
+
+  <script type="module" src="popup.js"></script>
+</body>
+</html>

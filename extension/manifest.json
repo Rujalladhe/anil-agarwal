@@ -1,0 +1,37 @@
+{
+  "manifest_version": 3,
+  "name": "Resume Scorer (Outlook -> AI)",
+  "version": "0.1.0",
+  "description": "Logs into Outlook, finds resume attachments, and scores them with an AI via a local backend.",
+  "permissions": [
+    "identity",
+    "storage",
+    "alarms",
+    "sidePanel"
+  ],
+  "host_permissions": [
+    "https://graph.microsoft.com/*",
+    "https://login.microsoftonline.com/*",
+    "http://localhost:8787/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "Resume Scorer",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "side_panel": {
+    "default_path": "popup.html"
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

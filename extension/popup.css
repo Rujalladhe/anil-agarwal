@@ -1,0 +1,540 @@
+/* ================================================================
+   Resume Scorer — extension popup styles.
+   Matches the dashboard's warm cream + sage-teal palette so the
+   extension and the web app feel like one product.
+   ================================================================ */
+
+:root {
+  --bg:           #f8f7f4;
+  --panel:        #ffffff;
+  --panel-2:      #f5f3ef;
+  --text:         #1c1917;
+  --text-soft:    #44403c;
+  --muted:        #78716c;
+  --muted-2:      #a8a29e;
+  --border:       #e7e5e0;
+  --border-soft:  #efece6;
+  --primary:      #3c6e64;
+  --primary-hover:#2d5650;
+  --primary-soft: #e9f1ee;
+  --primary-deep: #244841;
+  --primary-ring: rgba(60, 110, 100, 0.18);
+  --good:         #3f7e5e;
+  --good-soft:    #e3efe6;
+  --warn:         #a06b1f;
+  --warn-soft:    #f7ecd1;
+  --bad:          #9f3a3a;
+  --bad-soft:     #f5e0e0;
+  --shadow-xs:    0 1px 1px rgba(28, 25, 23, 0.04);
+  --shadow-sm:    0 1px 2px rgba(28, 25, 23, 0.05);
+  --shadow-md:    0 4px 14px rgba(28, 25, 23, 0.07);
+  --radius-sm:    8px;
+  --radius:       10px;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  font-family: 'Inter', 'SF Pro Display', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 13px;
+  color: var(--text);
+  background: var(--bg);
+  letter-spacing: -0.005em;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Side-panel layout: fill the panel width (Chrome gives us ~320-480px
+   depending on user resize). No max-width cap — let it grow with the
+   panel. Tighter padding than tab mode since horizontal space is tight. */
+body {
+  width: 100%;
+  min-width: 320px;
+  min-height: 100vh;
+  padding: 14px 16px 24px;
+  overflow-y: auto;
+}
+
+.hidden { display: none !important; }
+.muted  { color: var(--muted); }
+.small  { font-size: 11px; }
+
+/* ===================== Top bar ===================== */
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border-soft);
+  position: sticky;
+  top: 0;
+  background: var(--panel);
+  z-index: 2;
+  backdrop-filter: blur(6px);
+}
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-weight: 600;
+  font-size: 13.5px;
+  letter-spacing: -0.01em;
+}
+.brand img {
+  border-radius: 7px;
+  background: linear-gradient(140deg, #3c6e64 0%, #244841 100%);
+  padding: 2px;
+}
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.link-btn {
+  background: transparent;
+  border: none;
+  color: var(--primary);
+  padding: 5px 9px;
+  font-size: 12px;
+  font-weight: 500;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background .12s ease, color .12s ease;
+}
+.link-btn:hover { background: var(--primary-soft); color: var(--primary-deep); }
+
+/* ===================== Panels / typography ===================== */
+.panel { padding: 16px; }
+.panel p { line-height: 1.5; margin: 0 0 12px; }
+
+/* ===================== Tabs ===================== */
+.tabs {
+  display: flex;
+  gap: 2px;
+  border-bottom: 1px solid var(--border-soft);
+  margin: -6px -16px 14px;
+  padding: 0 16px;
+}
+.tab {
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  padding: 9px 12px;
+  color: var(--muted);
+  font-weight: 500;
+  font-size: 12.5px;
+  cursor: pointer;
+  transition: color .12s ease, border-color .12s ease;
+}
+.tab:hover { color: var(--text); }
+.tab.active {
+  color: var(--primary-deep);
+  border-bottom-color: var(--primary);
+  font-weight: 600;
+}
+.tab-pane.hidden { display: none; }
+
+.row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+/* ===================== Buttons ===================== */
+button {
+  font: inherit;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  padding: 8px 12px;
+  border: 1px solid transparent;
+  transition: background .15s ease, border-color .15s ease, color .15s ease;
+  letter-spacing: -0.005em;
+}
+button:disabled { opacity: 0.55; cursor: not-allowed; }
+
+.primary {
+  background: var(--primary);
+  color: white;
+  width: 100%;
+  font-weight: 600;
+  padding: 10px 12px;
+  box-shadow: 0 1px 1px rgba(36, 72, 65, 0.20);
+}
+.primary:hover:not(:disabled) { background: var(--primary-hover); }
+
+.secondary {
+  background: white;
+  border-color: var(--border);
+  color: var(--text-soft);
+  font-weight: 500;
+}
+.secondary:hover:not(:disabled) { background: var(--panel-2); border-color: #d6d3cc; }
+
+/* ===================== Error / empty ===================== */
+.error {
+  color: var(--bad);
+  background: var(--bad-soft);
+  border: 1px solid #ebcccc;
+  padding: 9px 11px;
+  border-radius: var(--radius-sm);
+  margin-top: 10px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.empty {
+  color: var(--muted);
+  text-align: center;
+  padding: 22px 16px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  background: var(--panel);
+  font-size: 12.5px;
+}
+
+/* ===================== Resume cards (inbox) ===================== */
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.resume-card {
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius);
+  padding: 11px 12px;
+  background: var(--panel);
+  cursor: pointer;
+  transition: border-color .12s ease, background .12s ease, box-shadow .12s ease;
+}
+.resume-card:hover {
+  border-color: var(--border);
+  box-shadow: var(--shadow-sm);
+}
+.resume-card.active {
+  border-color: var(--primary);
+  background: var(--primary-soft);
+  box-shadow: 0 0 0 3px var(--primary-ring);
+}
+
+.resume-card .card-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+.resume-card .filename {
+  font-weight: 600;
+  word-break: break-all;
+  flex: 1;
+  min-width: 0;
+  font-size: 12.5px;
+}
+.resume-card .meta {
+  color: var(--muted);
+  font-size: 11px;
+  margin-top: 3px;
+}
+.resume-card .subject {
+  margin-top: 3px;
+  color: var(--text-soft);
+  font-size: 12px;
+}
+
+.resume-card.pending { cursor: progress; opacity: 0.7; }
+
+/* ===================== Badges ===================== */
+.badge {
+  font-size: 10px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  white-space: nowrap;
+  flex-shrink: 0;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-weight: 600;
+  border: 1px solid transparent;
+}
+.badge-good {
+  background: var(--good-soft);
+  color: var(--good);
+  border-color: #c8dccd;
+}
+.badge-pending {
+  background: var(--panel-2);
+  color: var(--muted);
+  border-color: var(--border);
+}
+.badge-bad {
+  background: var(--bad-soft);
+  color: var(--bad);
+  border-color: #ebcccc;
+}
+.badge-cat {
+  background: var(--primary-soft);
+  color: var(--primary-deep);
+  border-color: #c8ddd2;
+}
+
+.result-tags {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 5px;
+}
+
+/* ===================== Rankings ===================== */
+.rankings { display: flex; flex-direction: column; gap: 14px; }
+.rank-group h4 {
+  margin: 0 0 8px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-weight: 600;
+}
+.rank-group .group-count {
+  font-weight: 500;
+  background: var(--panel-2);
+  border: 1px solid var(--border-soft);
+  border-radius: 999px;
+  padding: 1px 9px;
+  color: var(--muted);
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: 11px;
+}
+.rank-row {
+  display: grid;
+  /* minmax(0, 1fr) lets the name/meta column shrink past its content size
+     so a long filename can't push the score + Summarize button off-screen. */
+  grid-template-columns: 26px minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  margin-bottom: 6px;
+  font-size: 12px;
+  transition: border-color .12s ease, box-shadow .12s ease;
+}
+.rank-row:hover {
+  border-color: var(--border);
+  box-shadow: var(--shadow-sm);
+}
+.rank-row .rank-num {
+  color: var(--muted);
+  font-weight: 600;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+/* The unclassed wrapper div that holds name+meta. Needs min-width:0 so its
+   nowrap children can ellipsis instead of bullying the grid track. */
+.rank-row > div { min-width: 0; }
+.rank-row .rank-name {
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.rank-row .rank-meta {
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.rank-row .rank-score {
+  font-weight: 600;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  padding: 3px 9px;
+  border-radius: 999px;
+  font-size: 12px;
+}
+.rank-score.good { background: var(--good-soft); color: var(--good); }
+.rank-score.warn { background: var(--warn-soft); color: var(--warn); }
+.rank-score.bad  { background: var(--bad-soft);  color: var(--bad);  }
+
+.rank-row .summary-panel {
+  grid-column: 1 / -1;
+  margin-top: 8px;
+}
+
+/* ===================== Summarize button + panel ===================== */
+.btn-summarize {
+  font-size: 11px;
+  padding: 4px 10px;
+  background: white;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--primary-deep);
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: border-color .12s ease, background .12s ease, color .12s ease;
+}
+.btn-summarize:hover:not(:disabled) {
+  border-color: var(--primary);
+  background: var(--primary-soft);
+}
+.btn-summarize:disabled { color: var(--muted); }
+
+.resume-card .card-actions {
+  margin-top: 8px;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.summary-panel {
+  margin-top: 8px;
+  padding: 9px 11px;
+  background: var(--panel-2);
+  border: 1px solid var(--border-soft);
+  border-left: 3px solid var(--primary);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-soft);
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
+.summary-panel.error {
+  border-left-color: var(--bad);
+  background: var(--bad-soft);
+  color: var(--bad);
+}
+
+/* ===================== Result panel ===================== */
+.result {
+  border-top: 1px solid var(--border-soft);
+  padding-top: 14px;
+  margin-top: 6px;
+}
+.result h3 {
+  margin: 0 0 10px;
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.result h4 {
+  margin: 16px 0 6px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.score-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 12px;
+}
+.score-circle {
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--panel-2);
+  border: 3px solid var(--primary);
+  font-size: 20px;
+  font-weight: 600;
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+  color: var(--primary-deep);
+}
+.score-circle.good { border-color: var(--good); color: var(--good); }
+.score-circle.warn { border-color: var(--warn); color: var(--warn); }
+.score-circle.bad  { border-color: var(--bad);  color: var(--bad);  }
+
+.score-meta { min-width: 0; }
+.score-meta .filename { font-weight: 600; word-break: break-all; font-size: 13px; }
+
+.breakdown {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 7px;
+}
+.bar-row {
+  display: grid;
+  grid-template-columns: 80px 1fr 32px;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+.bar-row .label { color: var(--muted); text-transform: capitalize; }
+.bar {
+  background: var(--panel-2);
+  border-radius: 4px;
+  height: 6px;
+  overflow: hidden;
+}
+.bar > span {
+  display: block;
+  height: 100%;
+  background: var(--primary);
+  border-radius: 4px;
+  transition: width .35s ease;
+}
+.bar-row .val {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+.summary { margin: 6px 0; line-height: 1.5; color: var(--text-soft); }
+
+.cols { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.cols ul, ul#recommendations {
+  margin: 4px 0 0;
+  padding-left: 18px;
+  color: var(--text-soft);
+}
+.cols ul li, ul#recommendations li { margin-bottom: 5px; line-height: 1.45; }
+
+/* ===================== Loading ===================== */
+.loading {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 0;
+  color: var(--muted);
+  font-size: 12.5px;
+}
+.spinner {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 2px solid var(--border);
+  border-top-color: var(--primary);
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ===================== Scrollbar ===================== */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 10px;
+  border: 3px solid var(--bg);
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover { background-color: var(--muted-2); background-clip: padding-box; }

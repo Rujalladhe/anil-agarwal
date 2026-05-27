@@ -178,6 +178,89 @@ attached, then hit **Refresh inbox**.
 
 ---
 
+## Automation builder (Outlook → AI → Calendar / Meet / Gmail)
+
+The dashboard has an **Automation** tab — an N8N-style canvas where you wire
+together triggers, filters, and actions. The included playbooks let you do
+things like: "for everyone scoring ≥ 75, send the OA link **and** book a 30-min
+Google Meet interview with a panel of three engineers — find the first free slot
+on their calendars."
+
+### Node types
+
+- **Trigger · Manual run** — fires when you press Execute. (Only trigger for the MVP.)
+- **Logic · Filter** — score ≥ X, category, years, has/needs skills, must-have-email.
+- **Logic · Branch** — splits items into "top" (≥ threshold) and "rest" streams.
+- **Logic · Take top N** — sort by score, keep top N.
+- **Action · Send OA link** — Gmail send, template + `{{placeholders}}`.
+- **Action · Schedule interview** — picks the next free slot across the chosen
+  interviewers' calendars, creates an event with a fresh **Google Meet** link,
+  invites the candidate.
+- **Action · Polite rejection** — warm/direct/encouraging tones.
+- **Action · Notify me** — pin a note in the run history.
+- **Action · Log note** — stamp the run for later filtering.
+
+### Edge cases handled
+
+- **Dry-run mode** renders every email + every booking *without* sending — the
+  preview shows the exact subject/body/attendees. Use this before any blast.
+- Candidates with **no email on file** are recorded as `skipped`, not errors.
+- A **cycle detector** stops you from wiring a graph back on itself.
+- **Cancelled / failed** Gmail / Calendar calls are surfaced per-candidate in
+  the run history with the API's error message — partial runs keep going.
+- **Token refresh** is automatic — we refresh 60 s before expiry.
+- **Rate-limit pacing** — small delays between Gmail / Calendar calls.
+
+### Required API keys
+
+The Resume Scorer side keeps using your existing `GROQ_API_KEY` / `MODEL`.
+Automation actions that touch Google add three more values to `backend/.env`:
+
+```env
+# --- Google OAuth (Calendar + Gmail + Meet) ---
+GOOGLE_CLIENT_ID=xxxx-xxxxxx.apps.googleusercontent.com
+GOOGLE_CLIENT_SECRET=xxxxxxxxxxxxxxxxxxxx
+GOOGLE_REDIRECT_URI=http://localhost:8787/automation/google/callback
+```
+
+Steps to get those values:
+
+1. Open <https://console.cloud.google.com/> and create (or pick) a project.
+2. **APIs & Services → Library** — enable both:
+   - *Google Calendar API*
+   - *Gmail API*
+3. **APIs & Services → OAuth consent screen**
+   - User type: **External** (testing mode is fine).
+   - Add the Gmail address you'll send from as a **Test user**.
+   - Add scopes: `gmail.send`, `calendar.events`, `calendar.readonly`,
+     `openid`, `email`, `profile`.
+4. **APIs & Services → Credentials → Create credentials → OAuth client ID**
+   - Application type: **Web application**.
+   - Authorized redirect URI: `http://localhost:8787/automation/google/callback`
+     (must match `GOOGLE_REDIRECT_URI` byte-for-byte).
+5. Copy the **Client ID** + **Client secret** into `backend/.env` and restart
+   the backend.
+6. Open the dashboard → **Settings → Google connection → Connect Google**, walk
+   through the consent screen. You're done.
+
+You do **not** need a Meet API key — Meet links are conferences attached to
+Calendar events. As long as the user authorizing has a Google account that can
+create Meet meetings (any consumer or Workspace account), the
+`conferenceData.createRequest` field in the event-create call gets us a fresh
+Meet URL automatically. The URL appears in the run-history detail and in the
+calendar invite.
+
+### Smoke tests
+
+```bash
+cd backend && node test-automation.js
+```
+
+29 tests — exercises schema, CRUD, filter logic, template rendering, end-to-end
+dry-run, cycle detection, and the route handlers. No network calls.
+
+---
+
 ## Troubleshooting
 
 | Symptom | Likely cause / fix |

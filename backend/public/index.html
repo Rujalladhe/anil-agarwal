@@ -5,9 +5,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Resume Scorer · Dashboard</title>
   <link rel="stylesheet" href="dashboard.css" />
+  <link rel="stylesheet" href="automation.css" />
   <link rel="preconnect" href="https://cdn.jsdelivr.net" />
   <script defer src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer type="module" src="dashboard.js"></script>
+  <script defer type="module" src="automation.js"></script>
 </head>
 <body>
   <aside class="sidebar">
@@ -31,6 +33,9 @@
       </button>
       <button class="nav-btn" data-view="chat">
         <span class="ico">◆</span>AI Chat
+      </button>
+      <button class="nav-btn" data-view="automation">
+        <span class="ico">⚡</span>Automation
       </button>
       <button class="nav-btn" data-view="settings">
         <span class="ico">⚙</span>Settings
@@ -287,6 +292,198 @@
       </div>
     </section>
 
+    <!-- ===================== AUTOMATION VIEW ===================== -->
+    <section class="view hidden auto-view" data-view="automation">
+      <div class="auto-shell">
+        <!-- Left rail: workflow list + node palette -->
+        <aside class="auto-rail">
+          <div class="auto-rail-section">
+            <div class="auto-rail-head">
+              <h3>Workflows</h3>
+              <button id="autoNewWfBtn" class="btn primary small" title="New workflow">＋</button>
+            </div>
+            <ul id="autoWfList" class="auto-wf-list"></ul>
+          </div>
+
+          <div class="auto-rail-section auto-palette">
+            <h3>Add a node</h3>
+            <div class="auto-palette-group">
+              <div class="auto-palette-label">Triggers</div>
+              <button class="palette-node trigger" data-add="trigger.manual">
+                <span class="palette-ico">▶</span>
+                <div><div class="palette-name">Manual run</div>
+                <div class="palette-sub">Fire from a button</div></div>
+              </button>
+            </div>
+            <div class="auto-palette-group">
+              <div class="auto-palette-label">Logic</div>
+              <button class="palette-node logic" data-add="logic.filter">
+                <span class="palette-ico">◇</span>
+                <div><div class="palette-name">Filter</div>
+                <div class="palette-sub">Score · skills · category</div></div>
+              </button>
+              <button class="palette-node logic" data-add="logic.branch">
+                <span class="palette-ico">⌥</span>
+                <div><div class="palette-name">Branch</div>
+                <div class="palette-sub">Top vs rest</div></div>
+              </button>
+              <button class="palette-node logic" data-add="logic.limit">
+                <span class="palette-ico">↧</span>
+                <div><div class="palette-name">Take top N</div>
+                <div class="palette-sub">Rank then keep N</div></div>
+              </button>
+            </div>
+            <div class="auto-palette-group">
+              <div class="auto-palette-label">Actions</div>
+              <button class="palette-node action" data-add="action.sendOaEmail">
+                <span class="palette-ico">✉</span>
+                <div><div class="palette-name">Send OA link</div>
+                <div class="palette-sub">Gmail · templated</div></div>
+              </button>
+              <button class="palette-node action" data-add="action.scheduleInterview">
+                <span class="palette-ico">📅</span>
+                <div><div class="palette-name">Schedule interview</div>
+                <div class="palette-sub">Calendar + Meet link</div></div>
+              </button>
+              <button class="palette-node action" data-add="action.sendRejection">
+                <span class="palette-ico">✕</span>
+                <div><div class="palette-name">Polite rejection</div>
+                <div class="palette-sub">Gmail · brand-safe</div></div>
+              </button>
+              <button class="palette-node action" data-add="action.notify">
+                <span class="palette-ico">🔔</span>
+                <div><div class="palette-name">Notify me</div>
+                <div class="palette-sub">Run-history pin</div></div>
+              </button>
+              <button class="palette-node action" data-add="action.logRun">
+                <span class="palette-ico">≡</span>
+                <div><div class="palette-name">Log note</div>
+                <div class="palette-sub">Stamp the run</div></div>
+              </button>
+            </div>
+          </div>
+        </aside>
+
+        <!-- Center: canvas -->
+        <div class="auto-main">
+          <div class="auto-toolbar">
+            <input id="autoWfName" class="auto-wf-name" placeholder="Workflow name" />
+            <span class="auto-toolbar-spacer"></span>
+            <button id="autoPickCandidatesBtn" class="btn ghost small" title="Pick which candidates run through this workflow">
+              <span id="autoSelectedCount" class="auto-sel-count">0</span>
+              <span class="auto-sel-text">candidates</span>
+            </button>
+            <button id="autoSaveBtn"   class="btn ghost">Save</button>
+            <button id="autoDryRunBtn" class="btn ghost" title="Preview every send/booking — nothing leaves your machine">Dry run</button>
+            <button id="autoRunBtn"    class="btn primary">▶ Execute</button>
+          </div>
+
+          <div class="auto-canvas-wrap">
+            <div id="autoCanvas" class="auto-canvas">
+              <svg id="autoEdges" class="auto-edges"></svg>
+              <div id="autoNodes" class="auto-nodes"></div>
+              <div class="auto-canvas-grid"></div>
+              <div id="autoCanvasHint" class="auto-canvas-hint">
+                <h2>Build your hiring playbook</h2>
+                <p>Click any node on the left to drop it on the canvas. Drag from the small dot on a node to another node to connect them. Drag empty space to pan.</p>
+              </div>
+            </div>
+            <div class="canvas-zoom-overlay">
+              <button id="autoZoomOut"  class="zoom-btn" title="Zoom out">−</button>
+              <button id="autoZoomLevel" class="zoom-level" title="Fit to screen">85%</button>
+              <button id="autoZoomIn"   class="zoom-btn" title="Zoom in">+</button>
+            </div>
+          </div>
+
+          <!-- Bottom panel: history -->
+          <div class="auto-history">
+            <div class="auto-history-head">
+              <h3>Recent runs</h3>
+              <span class="muted small">click a row to inspect</span>
+            </div>
+            <div id="autoHistory" class="auto-history-list"></div>
+          </div>
+        </div>
+
+        <!-- Right: inspector for selected node -->
+        <aside id="autoInspector" class="auto-inspector empty">
+          <div class="auto-inspector-empty">
+            <div class="auto-inspector-ico">⚙</div>
+            <h3>Select a node</h3>
+            <p>Pick any node on the canvas to configure its rules, template, or interviewers.</p>
+          </div>
+        </aside>
+      </div>
+
+      <!-- Candidate picker modal -->
+      <div id="autoPickModal" class="modal hidden">
+        <div class="modal-backdrop" data-close="pick"></div>
+        <div class="modal-card auto-pick-card">
+          <button class="modal-close" data-close="pick">×</button>
+          <h2 style="margin:0 0 14px;font-size:18px;font-weight:600;letter-spacing:-0.02em;">Pick candidates</h2>
+          <div class="auto-pick-controls">
+            <input id="autoPickSearch" type="search" placeholder="Search name, skill, role…" />
+            <select id="autoPickCategory"><option value="">All categories</option></select>
+            <select id="autoPickMinScore">
+              <option value="">Any score</option>
+              <option value="50">≥ 50</option>
+              <option value="65">≥ 65</option>
+              <option value="75">≥ 75</option>
+              <option value="85">≥ 85</option>
+            </select>
+            <button id="autoPickAllBtn" class="btn ghost small">Use everyone matching</button>
+          </div>
+          <div class="auto-pick-list" id="autoPickList"></div>
+          <div class="auto-pick-foot">
+            <span id="autoPickFootCount" class="muted small">0 selected</span>
+            <button class="btn ghost" data-close="pick">Cancel</button>
+            <button id="autoPickConfirmBtn" class="btn primary">Use selection</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Template editor modal -->
+      <div id="autoTplModal" class="modal hidden">
+        <div class="modal-backdrop" data-close="tpl"></div>
+        <div class="modal-card auto-tpl-card">
+          <button class="modal-close" data-close="tpl">×</button>
+          <h2 style="margin:0 0 4px;font-size:18px;font-weight:600;letter-spacing:-0.02em;" id="autoTplTitle">New template</h2>
+          <p class="muted small" style="margin:0 0 18px;">Reusable OA invite body. Placeholders: <code>{{first_name}}</code> <code>{{name}}</code> <code>{{role}}</code> <code>{{score}}</code> <code>{{oa_link}}</code> <code>{{deadline}}</code>.</p>
+          <form id="autoTplForm" class="tpl-form">
+            <label class="tpl-field">
+              <span class="tpl-label">Template name</span>
+              <input id="tplName" required placeholder="e.g. Standard OA invite" />
+            </label>
+            <label class="tpl-field">
+              <span class="tpl-label">Subject</span>
+              <input id="tplSubject" required placeholder="Online assessment for the {{role}} role" />
+            </label>
+            <label class="tpl-field">
+              <span class="tpl-label">Shared OA link <span class="muted small">(optional default — node can override)</span></span>
+              <input id="tplLink" placeholder="https://oa.example.com/exam/abc" />
+            </label>
+            <label class="tpl-field">
+              <span class="tpl-label">Body</span>
+              <textarea id="tplBody" rows="11" required placeholder="Hi {{first_name}},&#10;&#10;Please complete the OA: {{oa_link}}"></textarea>
+            </label>
+            <div class="tpl-foot">
+              <button type="button" class="btn ghost" data-close="tpl">Cancel</button>
+              <button type="submit" class="btn primary">Save template</button>
+            </div>
+          </form>
+        </div>
+      </div>
+
+      <!-- Run detail modal -->
+      <div id="autoRunModal" class="modal hidden">
+        <div class="modal-backdrop" data-close="run"></div>
+        <div class="modal-card auto-run-card">
+          <button class="modal-close" data-close="run">×</button>
+          <div id="autoRunBody"></div>
+        </div>
+      </div>
+    </section>
+
     <!-- ===================== SETTINGS VIEW ===================== -->
     <section class="view hidden" data-view="settings">
       <div class="card">
@@ -298,6 +495,40 @@
         <p class="muted">Install the Chrome extension from <code>extension/</code> to pull resume attachments directly from Outlook. Scored resumes will show up here automatically.</p>
         <p class="muted">All AI calls happen server-side — no API keys live in the extension.</p>
       </div>
+      <div class="card">
+        <div class="card-head">
+          <h3>Google connection</h3>
+          <span class="muted small">Powers Send-email, Calendar, and Meet links</span>
+        </div>
+        <div id="googleStatus" class="google-status">loading…</div>
+        <div id="googleActions" class="google-actions"></div>
+        <div id="googleHelp" class="muted small google-help"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <h3>Interview panel</h3>
+          <span class="muted small">Calendars to consider for scheduling</span>
+        </div>
+        <div id="interviewerList" class="iv-list">loading…</div>
+        <form id="ivAddForm" class="iv-add">
+          <input id="ivName"     placeholder="Name (e.g. Anita Roy)" required />
+          <input id="ivEmail"    placeholder="email@company.com" type="email" required />
+          <input id="ivCalendar" placeholder="Calendar ID (defaults to 'primary')" />
+          <input id="ivTz"       placeholder="Timezone (e.g. Asia/Kolkata)" />
+          <button class="btn primary" type="submit">Add interviewer</button>
+        </form>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <h3>OA email templates</h3>
+          <span class="muted small">Reuse across workflows</span>
+        </div>
+        <div id="tplList" class="tpl-list">loading…</div>
+        <button id="tplNewBtn" class="btn ghost small" style="margin-top:8px;">＋ New template</button>
+      </div>
+
       <div class="card">
         <div class="card-head"><h3>Tips for saving tokens</h3></div>
         <ul class="muted">

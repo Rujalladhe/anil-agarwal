@@ -37,7 +37,8 @@ const VIEW_TITLES = {
   candidates: { title: 'Candidates', sub: 'Search, filter, and inspect every scored resume.' },
   match:      { title: 'JD Match',   sub: 'Paste a job description, get your best-fit candidates ranked.' },
   chat:       { title: 'AI Chat',    sub: 'Ask anything — across all resumes or about one in particular.' },
-  settings:   { title: 'Settings',   sub: 'Backend, extension, and token-saving notes.' }
+  automation: { title: 'Automation', sub: 'Build a node graph that sends OA links, books interviews, and more.' },
+  settings:   { title: 'Settings',   sub: 'Backend, extension, integrations, and token-saving notes.' }
 };
 
 function switchView(name) {
@@ -54,6 +55,7 @@ function switchView(name) {
   if (name === 'candidates') loadCandidates();
   if (name === 'match')      initMatchIfNeeded();
   if (name === 'chat')       initChatIfNeeded();
+  if (name === 'automation' && window.initAutomationIfNeeded) window.initAutomationIfNeeded();
   if (name === 'settings')   loadSettings();
 }
 
@@ -1069,6 +1071,7 @@ async function loadSettings() {
   } catch (err) {
     info.innerHTML = `<div class="k">Status</div><div class="v" style="color:var(--bad)">${err.message}</div>`;
   }
+  if (window.refreshAutomationSettings) window.refreshAutomationSettings();
 }
 
 // =================== Top-bar actions ===================

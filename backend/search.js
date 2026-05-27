@@ -76,9 +76,80 @@ export function searchResumes(filters = {}) {
     }
   }
 
+  // Location can match home location OR any work location OR raw text -- so
+  // "Boston" finds someone whose current address says Mumbai but worked in
+  // Boston. This is the single biggest fix for the Boston/remote miss.
   if (filters.location && filters.location.trim()) {
-    where.push('COALESCE(location, \'\') LIKE ? COLLATE NOCASE');
-    params.push(`%${filters.location.trim()}%`);
+    const loc = `%${filters.location.trim()}%`;
+    where.push(`(
+      COALESCE(location, '')          LIKE ? COLLATE NOCASE OR
+      COALESCE(work_locations, '')    LIKE ? COLLATE NOCASE OR
+      COALESCE(raw_text, '')          LIKE ? COLLATE NOCASE
+    )`);
+    params.push(loc, loc, loc);
+  }
+
+  // L2 new filters --------------------------------------------------------
+  if (filters.remote === true) {
+    where.push(`(
+      remote_worked = 1 OR
+      COALESCE(work_locations, '') LIKE '%remote%' COLLATE NOCASE OR
+      COALESCE(raw_text, '')       LIKE '%remote%' COLLATE NOCASE
+    )`);
+  }
+  if (Number.isFinite(filters.minRemoteYears)) {
+    where.push('COALESCE(remote_years, 0) >= ?');
+    params.push(filters.minRemoteYears);
+  }
+  if (filters.managedPeople === true) {
+    where.push('managed_people = 1');
+  }
+  if (Number.isFinite(filters.minTeamSize)) {
+    where.push('COALESCE(team_size_managed, 0) >= ?');
+    params.push(filters.minTeamSize);
+  }
+  if (filters.openToRelocate === true) {
+    where.push('open_to_relocate = 1');
+  }
+  if (filters.publications === true) {
+    where.push('publications = 1');
+  }
+  if (filters.company && filters.company.trim()) {
+    const co = `%${filters.company.trim()}%`;
+    where.push(`(
+      COALESCE(companies, '')       LIKE ? COLLATE NOCASE OR
+      COALESCE(current_company, '') LIKE ? COLLATE NOCASE OR
+      COALESCE(raw_text, '')        LIKE ? COLLATE NOCASE
+    )`);
+    params.push(co, co, co);
+  }
+  if (Array.isArray(filters.domains) && filters.domains.length) {
+    for (const d of filters.domains) {
+      const dom = String(d).trim();
+      if (!dom) continue;
+      where.push(`(
+        COALESCE(domains, '')  LIKE ? COLLATE NOCASE OR
+        COALESCE(raw_text, '') LIKE ? COLLATE NOCASE
+      )`);
+      params.push(`%${dom}%`, `%${dom}%`);
+    }
+  }
+  if (filters.school && filters.school.trim()) {
+    const sc = `%${filters.school.trim()}%`;
+    where.push(`(
+      COALESCE(education_json, '')    LIKE ? COLLATE NOCASE OR
+      COALESCE(highest_education, '') LIKE ? COLLATE NOCASE OR
+      COALESCE(raw_text, '')          LIKE ? COLLATE NOCASE
+    )`);
+    params.push(sc, sc, sc);
+  }
+  if (filters.workLocation && filters.workLocation.trim()) {
+    const wl = `%${filters.workLocation.trim()}%`;
+    where.push(`(
+      COALESCE(work_locations, '') LIKE ? COLLATE NOCASE OR
+      COALESCE(raw_text, '')       LIKE ? COLLATE NOCASE
+    )`);
+    params.push(wl, wl);
   }
 
   const sql = `
@@ -86,7 +157,12 @@ export function searchResumes(filters = {}) {
            email, phone, location, linkedin, github, portfolio,
            current_title, current_company, years_experience, highest_education,
            top_skills, languages, notice_period, expected_salary,
-           file_path, content_type, review_json
+           file_path, content_type,
+           work_locations, companies, domains,
+           remote_worked, remote_years, remote_evidence,
+           managed_people, team_size_managed, open_to_relocate,
+           education_json, certifications, publications,
+           review_json
     FROM resumes
     ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
     ORDER BY COALESCE(score, 0) DESC, created_at DESC
@@ -101,8 +177,17 @@ export function searchResumes(filters = {}) {
     try { review = JSON.parse(r.review_json); } catch { review = null; }
     return {
       ...r,
-      top_skills: safeJson(r.top_skills) || [],
-      languages: safeJson(r.languages) || [],
+      top_skills:     safeJson(r.top_skills)     || [],
+      languages:      safeJson(r.languages)      || [],
+      work_locations: safeJson(r.work_locations) || [],
+      companies:      safeJson(r.companies)      || [],
+      domains:        safeJson(r.domains)        || [],
+      education:      safeJson(r.education_json) || [],
+      certifications: safeJson(r.certifications) || [],
+      remote_worked:    r.remote_worked === 1,
+      managed_people:   r.managed_people === 1,
+      open_to_relocate: r.open_to_relocate === 1,
+      publications:     r.publications === 1,
       summary: review?.summary || '',
       review_json: undefined
     };
@@ -266,6 +351,181 @@ export function parseRecruiterQuery(text) {
     intent: isFiltery ? 'filter' : 'ask',
     raw
   };
+}
+
+// ---------------------------------------------------------------------------
+// LLM-based query parser (L3).
+//
+// The regex parser above (parseRecruiterQuery) is fast and free but only
+// understands a fixed grammar. parseRecruiterQueryLLM uses a tiny + cheap
+// LLM call (~50 input tokens, ~80 output tokens) to translate ANY phrasing
+// into the same filters object. If the LLM call fails or times out, we
+// fall back to the regex parser -- chat still works, just less smart.
+//
+// Allowed filter keys (must match searchResumes(filters) above):
+//   q, category, minScore, maxScore, minYears, maxYears, skills[], location,
+//   remote (bool), minRemoteYears, managedPeople (bool), minTeamSize,
+//   openToRelocate (bool), publications (bool), company, domains[], school,
+//   workLocation
+
+const LLM_PARSER_SYSTEM = `You translate recruiter-style natural-language questions about candidate resumes into a STRICT JSON filter object.
+
+Output a single JSON object and nothing else. No markdown fences, no commentary.
+
+Allowed top-level keys (omit any key that's not clearly implied by the question):
+  "category":        one of frontend|backend|fullstack|mobile|data|ml-ai|devops|security|qa|design|product|marketing|sales|hr|other
+  "minScore":        number 0-100
+  "minYears":        number   (e.g. "5+ years experience" -> 5)
+  "maxYears":        number   (e.g. "under 2 years" -> 2; "fresh grad" -> 1)
+  "skills":          array of skill strings (e.g. ["react","node.js"])
+  "location":        string — home/current city the candidate lives in
+  "workLocation":    string — a place they have WORKED at (not lived); ALWAYS set this when the user says "worked in <X>", "based in <X>", or names a city WITHOUT context about residence
+  "remote":          true if the user is asking for remote-work experience
+  "minRemoteYears":  number — minimum years of remote work
+  "managedPeople":   true if the user is asking for managers / team leads / people who led others
+  "minTeamSize":     number — minimum reports / team size managed
+  "openToRelocate":  true if the user wants candidates open to relocation
+  "publications":    true if the user wants candidates with papers / patents / books
+  "company":         string — a specific employer name the user mentions (e.g. "Google", "Acme")
+  "domains":         array of industry words (e.g. ["fintech","healthcare"])
+  "school":          string — university / college name
+  "intent":          "filter" if the user is asking to FIND/LIST/SHOW candidates, "ask" if it's an open-ended question about candidates
+
+Rules:
+- Be CONSERVATIVE. If you're not sure a key is implied, leave it out.
+- City names go to "workLocation" by default unless the user explicitly says "lives in" / "based in" / "from <X>" / "located in" — then "location".
+- "remote" / "WFH" / "work from home" / "distributed team" / "remote-first" all -> remote: true.
+- Don't invent skills or companies that the user didn't say.
+- Years: "2 yoe" / "2 yrs" / "2 years experience" -> minYears: 2 (interpret as "at least").
+- "fresh grad" / "intern" / "entry level" -> maxYears: 1.`;
+
+export async function parseRecruiterQueryLLM(query) {
+  const raw = String(query || '').trim();
+  if (!raw) return { filters: {}, intent: 'ask', raw, source: 'empty' };
+
+  const provider = (process.env.AI_PROVIDER || 'groq').toLowerCase();
+  // Allow a smaller / cheaper model just for parsing. Falls back to MODEL.
+  const model = process.env.PARSER_MODEL || process.env.MODEL || defaultParserModel(provider);
+
+  try {
+    const json = await callParserLLM({ provider, model, query: raw });
+    const filters = sanitizeFilters(json);
+    const intent = json.intent === 'filter' ? 'filter' : 'ask';
+    return { filters, intent, raw, source: 'llm' };
+  } catch (err) {
+    console.warn('[parseRecruiterQueryLLM] LLM parse failed, falling back to regex:', err.message);
+    const fallback = parseRecruiterQuery(raw);
+    return { ...fallback, source: 'regex-fallback' };
+  }
+}
+
+function defaultParserModel(provider) {
+  if (provider === 'groq')      return 'llama-3.1-8b-instant';
+  if (provider === 'anthropic') return 'claude-haiku-4-5-20251001';
+  if (provider === 'gemini')    return 'gemini-2.0-flash';
+  return '';
+}
+
+async function callParserLLM({ provider, model, query }) {
+  if (provider === 'groq') {
+    const key = process.env.GROQ_API_KEY;
+    if (!key) throw new Error('GROQ_API_KEY missing');
+    const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model,
+        temperature: 0,
+        response_format: { type: 'json_object' },
+        messages: [
+          { role: 'system', content: LLM_PARSER_SYSTEM },
+          { role: 'user',   content: `Recruiter question: """${query}"""\n\nReturn the JSON filter object now.` }
+        ]
+      })
+    });
+    if (!res.ok) throw new Error(`Groq ${res.status}: ${await res.text()}`);
+    const data = await res.json();
+    return parseStrictJson(data?.choices?.[0]?.message?.content ?? '');
+  }
+  if (provider === 'anthropic') {
+    const key = process.env.ANTHROPIC_API_KEY;
+    if (!key) throw new Error('ANTHROPIC_API_KEY missing');
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model, max_tokens: 400, temperature: 0,
+        system: LLM_PARSER_SYSTEM,
+        messages: [{ role: 'user', content: `Recruiter question: """${query}"""\n\nReturn the JSON filter object now.` }]
+      })
+    });
+    if (!res.ok) throw new Error(`Anthropic ${res.status}: ${await res.text()}`);
+    const data = await res.json();
+    const text = (data?.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('\n');
+    return parseStrictJson(text);
+  }
+  if (provider === 'gemini') {
+    const key = process.env.GEMINI_API_KEY;
+    if (!key) throw new Error('GEMINI_API_KEY missing');
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(key)}`;
+    const res = await fetch(url, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        systemInstruction: { parts: [{ text: LLM_PARSER_SYSTEM }] },
+        contents: [{ role: 'user', parts: [{ text: `Recruiter question: """${query}"""\n\nReturn the JSON filter object now.` }] }],
+        generationConfig: { temperature: 0, responseMimeType: 'application/json' }
+      })
+    });
+    if (!res.ok) throw new Error(`Gemini ${res.status}: ${await res.text()}`);
+    const data = await res.json();
+    const parts = data?.candidates?.[0]?.content?.parts || [];
+    return parseStrictJson(parts.map((p) => p.text || '').join('\n'));
+  }
+  throw new Error(`Unsupported provider ${provider}`);
+}
+
+function parseStrictJson(s) {
+  if (!s) throw new Error('empty parser response');
+  let t = String(s).trim();
+  if (t.startsWith('```')) t = t.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '');
+  const first = t.indexOf('{'), last = t.lastIndexOf('}');
+  if (first === -1 || last === -1) throw new Error(`no JSON object: ${t.slice(0, 200)}`);
+  return JSON.parse(t.slice(first, last + 1));
+}
+
+const ALLOWED_FILTER_KEYS = new Set([
+  'q','category','minScore','maxScore','minYears','maxYears','skills',
+  'location','workLocation','remote','minRemoteYears','managedPeople',
+  'minTeamSize','openToRelocate','publications','company','domains','school'
+]);
+
+// Coerce types + drop anything not in the allowlist. Defensive against
+// hallucinated keys / wrong types from the parser model.
+function sanitizeFilters(json) {
+  const out = {};
+  if (!json || typeof json !== 'object') return out;
+  const num = (v) => {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : undefined;
+  };
+  const str = (v) => (typeof v === 'string' && v.trim()) ? v.trim() : undefined;
+  const bool = (v) => v === true;
+  const arr = (v) => Array.isArray(v) ? v.map(String).map((s) => s.trim()).filter(Boolean) : undefined;
+
+  for (const [k, raw] of Object.entries(json)) {
+    if (!ALLOWED_FILTER_KEYS.has(k)) continue;
+    let v;
+    if (['minScore','maxScore','minYears','maxYears','minRemoteYears','minTeamSize'].includes(k)) v = num(raw);
+    else if (['remote','managedPeople','openToRelocate','publications'].includes(k))               v = bool(raw);
+    else if (['skills','domains'].includes(k))                                                      v = arr(raw);
+    else                                                                                            v = str(raw);
+    if (v !== undefined) out[k] = v;
+  }
+  // Clamp obvious score / year sanity bounds.
+  if (out.minScore != null) out.minScore = Math.max(0, Math.min(100, Math.round(out.minScore)));
+  if (out.maxScore != null) out.maxScore = Math.max(0, Math.min(100, Math.round(out.maxScore)));
+  if (out.category) out.category = String(out.category).toLowerCase();
+  return out;
 }
 
 // ---------------------------------------------------------------------------

@@ -9,16 +9,17 @@
 // Chat completion uses the same provider switch as scoring (groq/anthropic/gemini)
 // but in free-form text mode (no JSON coercion).
 
-import { retrieve } from './rag.js';
+import { retrieve, retrieveHybrid } from './rag.js';
 import {
   appendMessage, createThread, getMessages, getThread,
-  getResume, getAllResumesForChat, getResumeSummaries, setThreadTitle
+  getResume, getAllResumesForChat, getResumeSummaries, getResumeProfiles, setThreadTitle
 } from './db.js';
-import { parseRecruiterQuery, searchResumes } from './search.js';
+import { parseRecruiterQueryLLM, searchResumes } from './search.js';
 
 const TOP_K_PER_RESUME   = 6;
-const TOP_K_CROSS_RESUME = 10;
+const TOP_K_CROSS_RESUME = 20;   // L4: bumped from 10 -> 20 for short queries
 const MAX_HISTORY_TURNS  = 20;
+const MAX_CANDIDATES_IN_CONTEXT = 30;
 
 const SYSTEM_PROMPT = `You are a recruiting assistant helping the user review and compare scored resumes.
 You have access to selected excerpts from those resumes (retrieved via semantic search) plus their AI-generated scores and reviews.
@@ -149,13 +150,15 @@ async function buildPerResumeContext({ resumeId, query }) {
   const resume = getResume(resumeId);
   if (!resume) throw new Error(`Resume ${resumeId} not found.`);
 
-  // Try to retrieve chunks from this resume; if the resume hasn't been
-  // indexed (embeddings off, or indexing failed), fall back to raw text.
+  // L4: hybrid retrieval (vectors + BM25 + RRF). For a single resume with a
+  // small number of chunks this is mostly the same as vector-only, but it
+  // protects keyword-y questions ("which Spring annotations did they use?")
+  // from being missed by short-query embeddings.
   let chunks = [];
   try {
-    chunks = await retrieve({ query, resumeId, topK: TOP_K_PER_RESUME });
+    chunks = await retrieveHybrid({ query, resumeId, topK: TOP_K_PER_RESUME });
   } catch (err) {
-    console.warn('[chat] retrieve failed, falling back to raw text:', err.message);
+    console.warn('[chat] retrieveHybrid failed, falling back to raw text:', err.message);
   }
 
   const header = formatResumeHeader(resume);
@@ -167,7 +170,6 @@ async function buildPerResumeContext({ resumeId, query }) {
       `[Excerpt ${i + 1} | chunk ${c.chunk_index}]\n${c.text}`
     ).join('\n\n');
   } else {
-    // Fallback: small resumes fit in context anyway.
     excerpts = `[Full resume text]\n${truncate(resume.raw_text, 8000)}`;
   }
 
@@ -180,24 +182,31 @@ async function buildCrossResumeContext({ query }) {
     return '(No resumes have been scored yet. Tell the user to score some resumes first.)';
   }
 
-  // Layer 1 (token-cheap): try to extract structured filters from the query.
-  // If anything stuck, run a SQL search and use those rows as the primary
-  // context. Saves embedding lookups and keeps the prompt small + relevant.
-  const parsed = parseRecruiterQuery(query);
-  const usedFilters = Object.keys(parsed.filters).length > 0;
+  // Layer 1 (L3) -- LLM parses the question into a structured filter object.
+  // Fast (Llama 8B), close-to-free, handles any phrasing. Falls back to the
+  // regex parser inside parseRecruiterQueryLLM if the LLM call fails.
+  const parsed = await parseRecruiterQueryLLM(query);
+  const filters = parsed.filters || {};
+  const usedFilters = Object.keys(filters).length > 0;
 
+  // Layer 2 (L1+L2d) -- ALWAYS pass the raw query as `q` so the LIKE scan
+  // over raw_text catches words the parser didn't surface as a typed filter
+  // ("Boston", "remote", "fintech", names of schools, etc.).
   let candidateRows = [];
-  if (usedFilters) {
-    candidateRows = searchResumes({ ...parsed.filters, limit: 20 });
+  try {
+    candidateRows = searchResumes({ ...filters, q: query, limit: 30 });
+  } catch (err) {
+    console.warn('[chat] searchResumes failed:', err.message);
   }
 
-  // Layer 2 (RAG): always run cross-resume retrieval for excerpts. With local
-  // embeddings this is free, and it surfaces *why* a row matched.
+  // Layer 3 (L4) -- hybrid retrieval over chunks: vector + BM25 fused with
+  // Reciprocal Rank Fusion. Catches the long tail of phrasings the SQL
+  // scan would miss (synonyms, paraphrases, semantic-only matches).
   let chunks = [];
   try {
-    chunks = await retrieve({ query, resumeId: null, topK: TOP_K_CROSS_RESUME });
+    chunks = await retrieveHybrid({ query, resumeId: null, topK: TOP_K_CROSS_RESUME });
   } catch (err) {
-    console.warn('[chat] cross-resume retrieve failed:', err.message);
+    console.warn('[chat] retrieveHybrid failed:', err.message);
   }
 
   const hitsByResume = new Map();
@@ -206,36 +215,42 @@ async function buildCrossResumeContext({ query }) {
     hitsByResume.get(c.resume_id).push(c);
   }
 
-  // Merge: filter rows take priority; then add RAG-only resumes; then fall
-  // back to all resumes if neither produced anything.
+  // Merge: SQL filter rows first (they matched on structured + raw_text);
+  // then RAG-only resumes (matched on chunks but not SQL); finally fall
+  // back to ALL resumes if nothing matched at all.
   let resumeIds;
   if (candidateRows.length) {
     const filterIds = candidateRows.map((r) => r.id);
     const ragOnly = Array.from(hitsByResume.keys()).filter((id) => !filterIds.includes(id));
-    resumeIds = [...filterIds, ...ragOnly].slice(0, 25);
+    resumeIds = [...filterIds, ...ragOnly].slice(0, MAX_CANDIDATES_IN_CONTEXT);
   } else if (hitsByResume.size > 0) {
-    resumeIds = Array.from(hitsByResume.keys());
+    resumeIds = Array.from(hitsByResume.keys()).slice(0, MAX_CANDIDATES_IN_CONTEXT);
   } else {
-    resumeIds = all.map((r) => r.id).slice(0, 25);
+    resumeIds = all.map((r) => r.id).slice(0, MAX_CANDIDATES_IN_CONTEXT);
   }
 
-  const summaries = getResumeSummaries(resumeIds);
+  // L2 -- inject FULL structured profiles, not just review summaries. This
+  // means the model sees workLocations, remote flags, companies, domains,
+  // managed-people flag, etc. for every candidate in the context, even when
+  // those facts weren't in the retrieved chunks.
+  const profiles = getResumeProfiles(resumeIds);
 
-  const candidateBlocks = summaries.map((r) => {
-    const header = formatResumeHeader(r);
-    const review = compactReview(r.review);
-    const excerpts = (hitsByResume.get(r.id) || [])
+  const candidateBlocks = profiles.map((p) => {
+    const header  = formatResumeHeader(p);
+    const profile = compactProfile(p);
+    const review  = compactReview(p.review);
+    const excerpts = (hitsByResume.get(p.id) || [])
       .map((c, i) => `  [Excerpt ${i + 1}] ${truncate(c.text, 600)}`)
       .join('\n');
-    return excerpts
-      ? `${header}\n${review}\nExcerpts:\n${excerpts}`
-      : `${header}\n${review}`;
+    const parts = [header, profile, review].filter(Boolean);
+    if (excerpts) parts.push(`Excerpts:\n${excerpts}`);
+    return parts.join('\n');
   }).join('\n\n---\n\n');
 
   const totalCount = all.length;
-  const shownCount = summaries.length;
+  const shownCount = profiles.length;
   const filterNote = usedFilters
-    ? `\n(Pre-filtered using: ${JSON.stringify(parsed.filters)}.)`
+    ? `\n(Parsed filters (${parsed.source}): ${JSON.stringify(filters)}.)`
     : '';
   const note = shownCount < totalCount
     ? `\n\n(Showing ${shownCount} of ${totalCount} candidates -- the most relevant for the query.${filterNote})`
@@ -252,6 +267,56 @@ function formatResumeHeader(resume) {
   const file = resume.filename || '';
   const score = resume.score != null ? `score ${resume.score}/100` : 'unscored';
   return `Candidate #${resume.id}: ${name} -- ${file} -- ${score}`;
+}
+
+// One-line-per-fact profile block. Only emits lines we actually have data
+// for, so a sparse profile stays short. Crucial -- this is how the model
+// SEES the structured fields (remote_worked, work_locations, etc.) without
+// us needing to retrieve a chunk that happens to mention them.
+function compactProfile(p) {
+  if (!p) return '';
+  const lines = [];
+  if (p.current_title || p.current_company) {
+    lines.push(`Current role: ${[p.current_title, p.current_company].filter(Boolean).join(' @ ')}`);
+  }
+  if (Number.isFinite(p.years_experience) && p.years_experience > 0) {
+    lines.push(`Total experience: ${p.years_experience} yrs`);
+  }
+  if (p.location) lines.push(`Home/base location: ${p.location}`);
+  if (Array.isArray(p.work_locations) && p.work_locations.length) {
+    lines.push(`Work locations: ${p.work_locations.join('; ')}`);
+  }
+  if (p.remote_worked) {
+    const years = Number(p.remote_years) > 0 ? ` (${p.remote_years} yrs)` : '';
+    const ev = p.remote_evidence ? ` — "${p.remote_evidence}"` : '';
+    lines.push(`Remote experience: yes${years}${ev}`);
+  }
+  if (Array.isArray(p.companies) && p.companies.length) {
+    lines.push(`Companies: ${p.companies.join('; ')}`);
+  }
+  if (Array.isArray(p.domains) && p.domains.length) {
+    lines.push(`Domains: ${p.domains.join(', ')}`);
+  }
+  if (p.managed_people) {
+    const ts = Number(p.team_size_managed) > 0 ? ` (team of ${p.team_size_managed})` : '';
+    lines.push(`Managed people: yes${ts}`);
+  }
+  if (p.open_to_relocate) lines.push(`Open to relocate: yes`);
+  if (p.publications)     lines.push(`Has publications/patents: yes`);
+  if (p.highest_education) lines.push(`Education: ${p.highest_education}`);
+  if (Array.isArray(p.education) && p.education.length) {
+    lines.push(`Schools: ${p.education.map((e) => [e.school, e.degree].filter(Boolean).join(' — ')).join('; ')}`);
+  }
+  if (Array.isArray(p.top_skills) && p.top_skills.length) {
+    lines.push(`Top skills: ${p.top_skills.join(', ')}`);
+  }
+  if (Array.isArray(p.certifications) && p.certifications.length) {
+    lines.push(`Certifications: ${p.certifications.join(', ')}`);
+  }
+  if (Array.isArray(p.languages) && p.languages.length) {
+    lines.push(`Languages: ${p.languages.join(', ')}`);
+  }
+  return lines.length ? `Profile:\n  ${lines.join('\n  ')}` : '';
 }
 
 function compactReview(review) {

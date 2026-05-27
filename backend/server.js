@@ -33,6 +33,19 @@ import {
   getDb, insertResume, listResumes, listResumesByCategory, getResume,
   listResumesForExport, listThreads, getThread, getMessages
 } from './db.js';
+import {
+  ensureAutomationSchema, seedDefaults,
+  listWorkflows, getWorkflow, createWorkflow, updateWorkflow, deleteWorkflow,
+  listRuns, getRun,
+  listInterviewers, createInterviewer, deleteInterviewer,
+  addAvailabilityWindow, removeAvailabilityWindow,
+  listTemplates, getTemplate, createTemplate, updateTemplate, deleteTemplate
+} from './automationDb.js';
+import { runWorkflow } from './automation.js';
+import {
+  googleConfigured, googleConnected, googleProfile,
+  getAuthUrl, exchangeCode, disconnectGoogle
+} from './google.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const UPLOADS_DIR = join(__dirname, 'uploads');
@@ -79,6 +92,8 @@ function readSearchFilters(src) {
 // Touch the DB on startup so a misconfigured sqlite-vec binary fails loudly
 // at boot rather than on the first chat request.
 getDb();
+ensureAutomationSchema();
+try { seedDefaults(); } catch (err) { console.warn('[automation] seed failed:', err.message); }
 
 // In-process pub/sub for dashboard live updates. Every connected /events
 // client gets a frame whenever a resume is scored (from /score, /score-text,
@@ -699,6 +714,179 @@ function guessCandidateName(text) {
   }
   return null;
 }
+
+// ---------------------------------------------------------------------------
+// Automation builder — workflows, runs, integrations, interviewers, templates
+
+app.get('/automation/workflows', (_req, res) => {
+  try { res.json({ workflows: listWorkflows() }); }
+  catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/automation/workflows/:id', (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id.' });
+  const wf = getWorkflow(id);
+  if (!wf) return res.status(404).json({ error: 'Workflow not found.' });
+  res.json(wf);
+});
+
+app.post('/automation/workflows', (req, res) => {
+  const { name, description, graph } = req.body || {};
+  if (!name || typeof name !== 'string') return res.status(400).json({ error: 'Missing workflow name.' });
+  try {
+    const id = createWorkflow({ name, description, graph });
+    res.json({ id, workflow: getWorkflow(id) });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.put('/automation/workflows/:id', (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id.' });
+  try {
+    const ok = updateWorkflow(id, req.body || {});
+    if (!ok) return res.status(404).json({ error: 'Workflow not found.' });
+    res.json({ ok: true, workflow: getWorkflow(id) });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.delete('/automation/workflows/:id', (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id.' });
+  res.json({ deleted: deleteWorkflow(id) });
+});
+
+// Run / dry-run a workflow. Body: { mode, candidateIds?, overrides? }
+app.post('/automation/workflows/:id/run', async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id.' });
+  const { mode = 'live', candidateIds = null, overrides = {} } = req.body || {};
+  try {
+    const result = await runWorkflow(id, { mode, candidateIds, manualOverrides: overrides });
+    res.json(result);
+  } catch (err) {
+    console.error('[/automation/run] error:', err);
+    res.status(500).json({ error: err.message || 'Workflow run failed.' });
+  }
+});
+
+app.get('/automation/runs', (req, res) => {
+  const workflowId = req.query.workflowId ? Number(req.query.workflowId) : undefined;
+  res.json({ runs: listRuns({ workflowId, limit: 50 }) });
+});
+
+app.get('/automation/runs/:id', (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id.' });
+  const run = getRun(id);
+  if (!run) return res.status(404).json({ error: 'Run not found.' });
+  res.json(run);
+});
+
+// --- Google integration ---
+
+app.get('/automation/google/status', (_req, res) => {
+  res.json({
+    configured: googleConfigured(),
+    connected:  googleConnected(),
+    profile:    googleProfile(),
+    redirectUri: process.env.GOOGLE_REDIRECT_URI || 'http://localhost:8787/automation/google/callback'
+  });
+});
+
+app.get('/automation/google/auth', (_req, res) => {
+  try { res.json({ url: getAuthUrl() }); }
+  catch (err) { res.status(400).json({ error: err.message }); }
+});
+
+app.get('/automation/google/callback', async (req, res) => {
+  const { code, error } = req.query || {};
+  if (error) {
+    return res.status(400).send(`<h2>Google auth failed</h2><p>${escapeHtml(String(error))}</p>`);
+  }
+  if (!code) return res.status(400).send('Missing code.');
+  try {
+    await exchangeCode(String(code));
+    res.send(`
+      <!doctype html><html><body style="font-family:Inter,sans-serif;padding:40px;background:#f8f7f4;">
+        <h2 style="color:#244841;">Google connected ✓</h2>
+        <p>You can close this tab and return to the dashboard.</p>
+        <script>setTimeout(() => { window.close(); }, 1500);</script>
+      </body></html>
+    `);
+  } catch (err) {
+    console.error('[google callback]', err);
+    res.status(500).send(`<h2>Google auth error</h2><pre>${escapeHtml(err.message)}</pre>`);
+  }
+});
+
+app.post('/automation/google/disconnect', (_req, res) => {
+  disconnectGoogle();
+  res.json({ ok: true });
+});
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+}
+
+// --- Interviewers ---
+
+app.get('/automation/interviewers', (_req, res) => {
+  res.json({ interviewers: listInterviewers() });
+});
+app.post('/automation/interviewers', (req, res) => {
+  const { name, email, calendarId, timezone } = req.body || {};
+  if (!name || !email) return res.status(400).json({ error: 'name and email are required.' });
+  const id = createInterviewer({ name, email, calendarId, timezone });
+  res.json({ id, interviewers: listInterviewers() });
+});
+app.delete('/automation/interviewers/:id', (req, res) => {
+  res.json({ deleted: deleteInterviewer(Number(req.params.id)) });
+});
+
+// Add an availability window. Body: { start: ISO, end: ISO }
+app.post('/automation/interviewers/:id/availability', (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id.' });
+  try {
+    const r = addAvailabilityWindow(id, req.body || {});
+    res.json({ ok: true, ...r, interviewers: listInterviewers() });
+  } catch (err) { res.status(400).json({ error: err.message }); }
+});
+
+app.delete('/automation/interviewers/:id/availability/:windowId', (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id.' });
+  const removed = removeAvailabilityWindow(id, String(req.params.windowId));
+  res.json({ deleted: removed, interviewers: listInterviewers() });
+});
+
+// --- OA email templates ---
+
+app.get('/automation/templates', (_req, res) => {
+  res.json({ templates: listTemplates() });
+});
+app.get('/automation/templates/:id', (req, res) => {
+  const t = getTemplate(Number(req.params.id));
+  if (!t) return res.status(404).json({ error: 'Template not found.' });
+  res.json(t);
+});
+app.post('/automation/templates', (req, res) => {
+  const { name, subject, body, oaLink } = req.body || {};
+  if (!name || !subject || !body) return res.status(400).json({ error: 'name, subject, body required.' });
+  const id = createTemplate({ name, subject, body, oaLink });
+  res.json({ id, templates: listTemplates() });
+});
+app.put('/automation/templates/:id', (req, res) => {
+  const ok = updateTemplate(Number(req.params.id), req.body || {});
+  if (!ok) return res.status(404).json({ error: 'Template not found.' });
+  res.json({ ok: true, templates: listTemplates() });
+});
+app.delete('/automation/templates/:id', (req, res) => {
+  res.json({ deleted: deleteTemplate(Number(req.params.id)) });
+});
+
+// ---------------------------------------------------------------------------
 
 const PORT = Number(process.env.PORT) || 8787;
 app.listen(PORT, () => {

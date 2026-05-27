@@ -66,7 +66,7 @@ Return ONLY a JSON object with EXACTLY this shape:
     "name":           "<full name, or empty string if not found>",
     "email":          "<primary email, or empty string>",
     "phone":          "<primary phone number, or empty string>",
-    "location":       "<city/country, or empty string>",
+    "location":       "<candidate's CURRENT/HOME city + country, e.g. 'Mumbai, India', or empty string>",
     "linkedin":       "<full linkedin profile URL, or empty string>",
     "github":         "<full github profile URL, or empty string>",
     "portfolio":      "<personal website / portfolio URL, or empty string>",
@@ -77,7 +77,27 @@ Return ONLY a JSON object with EXACTLY this shape:
     "topSkills":       ["<skill>", "..."],
     "languages":       ["<spoken language>", "..."],
     "noticePeriod":   "<notice period if mentioned, or empty string>",
-    "expectedSalary": "<expected salary / CTC if mentioned, or empty string>"
+    "expectedSalary": "<expected salary / CTC if mentioned, or empty string>",
+    "workLocations":   ["<every distinct city/country/'Remote' mentioned across the candidate's job history, e.g. 'Boston, USA', 'Remote', 'Bangalore, India'>"],
+    "companies":       ["<every employer name the candidate has worked at, in chronological order>"],
+    "domains":         ["<industry/domain words: e.g. 'fintech', 'healthcare', 'e-commerce', 'gaming', 'edtech', 'logistics', 'cybersecurity'>"],
+    "remoteExperience": {
+      "worked":  <true if the candidate has EVER worked remotely / from home / in a distributed team>,
+      "years":   <number of years of remote experience; 0 if unknown>,
+      "evidence": "<short phrase quoted from the resume that justifies this, e.g. 'Remote, Boston USA (2021-2024)'; empty if false>"
+    },
+    "managedPeople":   <true if the candidate has ever managed/led a team or direct reports>,
+    "teamSizeManaged": <number of direct reports or team size, 0 if unknown>,
+    "openToRelocate":  <true if the resume explicitly says open to relocation, else false>,
+    "education": [
+      {
+        "degree":     "<e.g. 'BSc Computer Science' or 'MBA Finance'>",
+        "school":     "<institution name>",
+        "year":       "<graduation year as string, or empty>"
+      }
+    ],
+    "certifications": ["<certification names if any>"],
+    "publications":   <true if the candidate has academic papers / patents / books, else false>
   },
   "breakdown": {
     "experience": <integer 0-100>,
@@ -148,34 +168,64 @@ function parseModelJson(raw) {
 
 // ---------------------------------------------------------------------------
 // Groq (OpenAI-compatible) -- default provider.
+//
+// Free tier is rate-limited (12k TPM on llama-3.3-70b). On a 429 we parse the
+// "Please try again in X" hint Groq includes in the error body and wait that
+// long, then retry. Up to MAX_429_RETRIES attempts before giving up.
+const MAX_429_RETRIES = 4;
+
 async function callGroq({ model, prompt }) {
   const key = process.env.GROQ_API_KEY;
   if (!key) throw new Error('GROQ_API_KEY is not set in backend/.env');
 
-  const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${key}`,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({
-      model,
-      temperature: 0.2,
-      response_format: { type: 'json_object' },
-      messages: [
-        { role: 'system', content: SYSTEM_PROMPT },
-        { role: 'user', content: prompt }
-      ]
-    })
-  });
+  for (let attempt = 0; attempt <= MAX_429_RETRIES; attempt++) {
+    const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${key}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        model,
+        temperature: 0.2,
+        response_format: { type: 'json_object' },
+        messages: [
+          { role: 'system', content: SYSTEM_PROMPT },
+          { role: 'user', content: prompt }
+        ]
+      })
+    });
 
-  if (!res.ok) {
+    if (res.ok) {
+      const data = await res.json();
+      return data?.choices?.[0]?.message?.content ?? '';
+    }
+
     const body = await res.text();
+
+    // Retry on 429s. Parse the suggested delay from the error body if present
+    // (Groq's format: "Please try again in 6.585s"); fall back to exponential.
+    if (res.status === 429 && attempt < MAX_429_RETRIES) {
+      const waitMs = parseRetryDelayMs(body) ?? (1000 * Math.pow(2, attempt));
+      console.warn(`[groq] 429 rate-limited; waiting ${Math.round(waitMs)}ms (attempt ${attempt + 1}/${MAX_429_RETRIES}).`);
+      await sleep(waitMs + 250);   // tiny cushion
+      continue;
+    }
+
     throw new Error(`Groq API ${res.status}: ${body}`);
   }
-  const data = await res.json();
-  return data?.choices?.[0]?.message?.content ?? '';
 }
+
+function parseRetryDelayMs(body) {
+  // "Please try again in 6.585s" / "Please try again in 850ms"
+  const sec = body.match(/try again in\s+([\d.]+)\s*s\b/i);
+  if (sec) return Math.ceil(Number(sec[1]) * 1000);
+  const ms  = body.match(/try again in\s+(\d+)\s*ms/i);
+  if (ms) return Number(ms[1]);
+  return null;
+}
+
+function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
 // ---------------------------------------------------------------------------
 // Anthropic Messages API.
@@ -357,6 +407,10 @@ function normalizeShape(obj) {
 
   const c = obj.candidate || {};
   const yrs = Number(c.yearsExperience);
+  const rem = c.remoteExperience || {};
+  const remYears = Number(rem.years);
+  const teamSize = Number(c.teamSizeManaged);
+  const eduList = Array.isArray(c.education) ? c.education : [];
   const candidate = {
     name:             String(c.name || '').slice(0, 120),
     email:            String(c.email || '').slice(0, 200),
@@ -372,7 +426,26 @@ function normalizeShape(obj) {
     topSkills:        arr(c.topSkills).slice(0, 20),
     languages:        arr(c.languages).slice(0, 10),
     noticePeriod:     String(c.noticePeriod || '').slice(0, 60),
-    expectedSalary:   String(c.expectedSalary || '').slice(0, 60)
+    expectedSalary:   String(c.expectedSalary || '').slice(0, 60),
+    // New enriched fields (L2):
+    workLocations:    arr(c.workLocations).map((s) => s.slice(0, 80)).slice(0, 20),
+    companies:        arr(c.companies).map((s) => s.slice(0, 80)).slice(0, 20),
+    domains:          arr(c.domains).map((s) => s.toLowerCase().slice(0, 40)).slice(0, 15),
+    remoteExperience: {
+      worked:   Boolean(rem.worked),
+      years:    Number.isFinite(remYears) ? Math.max(0, Math.min(60, remYears)) : 0,
+      evidence: String(rem.evidence || '').slice(0, 200)
+    },
+    managedPeople:    Boolean(c.managedPeople),
+    teamSizeManaged:  Number.isFinite(teamSize) ? Math.max(0, Math.min(1000, teamSize)) : 0,
+    openToRelocate:   Boolean(c.openToRelocate),
+    education:        eduList.slice(0, 6).map((e) => ({
+      degree: String(e.degree || '').slice(0, 120),
+      school: String(e.school || '').slice(0, 120),
+      year:   String(e.year || '').slice(0, 8)
+    })),
+    certifications:   arr(c.certifications).map((s) => s.slice(0, 120)).slice(0, 15),
+    publications:     Boolean(c.publications)
   };
 
   return {

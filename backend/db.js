@@ -106,11 +106,87 @@ export function getDb() {
   migrateAddColumnIfMissing(db, 'resumes', 'file_path', 'TEXT');
   migrateAddColumnIfMissing(db, 'resumes', 'content_type', 'TEXT');
 
+  // --- L2: enriched recruiter-grade columns ----------------------------------
+  // All list/object fields stored as JSON strings.
+  migrateAddColumnIfMissing(db, 'resumes', 'work_locations',   'TEXT');   // JSON array
+  migrateAddColumnIfMissing(db, 'resumes', 'companies',        'TEXT');   // JSON array
+  migrateAddColumnIfMissing(db, 'resumes', 'domains',          'TEXT');   // JSON array (lowercased)
+  migrateAddColumnIfMissing(db, 'resumes', 'remote_worked',    'INTEGER');// 0/1
+  migrateAddColumnIfMissing(db, 'resumes', 'remote_years',     'REAL');
+  migrateAddColumnIfMissing(db, 'resumes', 'remote_evidence',  'TEXT');
+  migrateAddColumnIfMissing(db, 'resumes', 'managed_people',   'INTEGER');// 0/1
+  migrateAddColumnIfMissing(db, 'resumes', 'team_size_managed','INTEGER');
+  migrateAddColumnIfMissing(db, 'resumes', 'open_to_relocate', 'INTEGER');// 0/1
+  migrateAddColumnIfMissing(db, 'resumes', 'education_json',   'TEXT');   // JSON array
+  migrateAddColumnIfMissing(db, 'resumes', 'certifications',   'TEXT');   // JSON array
+  migrateAddColumnIfMissing(db, 'resumes', 'publications',     'INTEGER');// 0/1
+
   // Indexes that depend on migrated columns -- create AFTER migrations.
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_resumes_category_score
       ON resumes(category, score DESC);
+    CREATE INDEX IF NOT EXISTS idx_resumes_remote
+      ON resumes(remote_worked);
   `);
+
+  // --- L4: FTS5 over chunk text for BM25/keyword retrieval ------------------
+  // External-content FTS5 table mirrors `chunks` via triggers. CRITICAL: use
+  // CREATE TRIGGER IF NOT EXISTS, never DROP+CREATE -- dropping triggers on
+  // every connect mutates the schema cookie. If two processes (server + a
+  // script) both reconnect, FTS5's internal index goes out of sync with the
+  // data and SQLite reports "database disk image is malformed". With IF NOT
+  // EXISTS the triggers are created exactly once and survive forever.
+  db.exec(`
+    CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
+      text,
+      content='chunks',
+      content_rowid='id',
+      tokenize='porter unicode61'
+    );
+
+    CREATE TRIGGER IF NOT EXISTS chunks_ai AFTER INSERT ON chunks BEGIN
+      INSERT INTO chunks_fts(rowid, text) VALUES (new.id, new.text);
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS chunks_ad AFTER DELETE ON chunks BEGIN
+      INSERT INTO chunks_fts(chunks_fts, rowid, text) VALUES('delete', old.id, old.text);
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS chunks_au AFTER UPDATE ON chunks BEGIN
+      INSERT INTO chunks_fts(chunks_fts, rowid, text) VALUES('delete', old.id, old.text);
+      INSERT INTO chunks_fts(rowid, text) VALUES (new.id, new.text);
+    END;
+  `);
+
+  // First-run backfill + drift-repair. If FTS row count diverges from the
+  // chunks table, rebuild the index. The rebuild operation is built into
+  // FTS5 for exactly this situation -- it re-reads `chunks` and re-emits
+  // every term, fixing any "malformed" state from earlier mishaps.
+  try {
+    const ftsCount = db.prepare('SELECT COUNT(*) AS n FROM chunks_fts').get().n;
+    const chunkCount = db.prepare('SELECT COUNT(*) AS n FROM chunks').get().n;
+    if (ftsCount === 0 && chunkCount > 0) {
+      db.exec(`INSERT INTO chunks_fts(rowid, text) SELECT id, text FROM chunks`);
+    } else if (ftsCount !== chunkCount) {
+      console.warn(`[db] FTS5 drift detected (${ftsCount} fts rows vs ${chunkCount} chunks). Rebuilding...`);
+      db.exec(`INSERT INTO chunks_fts(chunks_fts) VALUES('rebuild')`);
+    }
+  } catch (err) {
+    // Likely "database disk image is malformed" from a prior race. Hard
+    // reset the FTS5 index from chunks -- safe, doesn't touch resumes /
+    // chunks / vectors / chats.
+    console.warn(`[db] FTS5 check failed (${err.message}); hard-resetting chunks_fts.`);
+    db.exec(`DROP TABLE IF EXISTS chunks_fts`);
+    db.exec(`
+      CREATE VIRTUAL TABLE chunks_fts USING fts5(
+        text,
+        content='chunks',
+        content_rowid='id',
+        tokenize='porter unicode61'
+      );
+      INSERT INTO chunks_fts(rowid, text) SELECT id, text FROM chunks;
+    `);
+  }
 
   _db = db;
   return db;
@@ -137,8 +213,21 @@ export function insertResume({
 }) {
   const db = getDb();
   const c = candidate || {};
-  const topSkillsJson = Array.isArray(c.topSkills) ? JSON.stringify(c.topSkills) : null;
-  const languagesJson = Array.isArray(c.languages) ? JSON.stringify(c.languages) : null;
+  const topSkillsJson    = Array.isArray(c.topSkills)     ? JSON.stringify(c.topSkills)     : null;
+  const languagesJson    = Array.isArray(c.languages)     ? JSON.stringify(c.languages)     : null;
+  const workLocsJson     = Array.isArray(c.workLocations) ? JSON.stringify(c.workLocations) : null;
+  const companiesJson    = Array.isArray(c.companies)     ? JSON.stringify(c.companies)     : null;
+  const domainsJson      = Array.isArray(c.domains)       ? JSON.stringify(c.domains)       : null;
+  const educationJson    = Array.isArray(c.education)     ? JSON.stringify(c.education)     : null;
+  const certsJson        = Array.isArray(c.certifications)? JSON.stringify(c.certifications): null;
+  const rem              = c.remoteExperience || {};
+  const remoteWorked     = (rem.worked === true) ? 1 : (rem.worked === false ? 0 : null);
+  const remoteYears      = Number.isFinite(Number(rem.years)) ? Number(rem.years) : null;
+  const remoteEvidence   = rem.evidence ? String(rem.evidence) : null;
+  const managedPeopleInt = (c.managedPeople  === true) ? 1 : (c.managedPeople  === false ? 0 : null);
+  const openToRelocInt   = (c.openToRelocate === true) ? 1 : (c.openToRelocate === false ? 0 : null);
+  const publicationsInt  = (c.publications   === true) ? 1 : (c.publications   === false ? 0 : null);
+  const teamSize         = Number.isFinite(Number(c.teamSizeManaged)) ? Number(c.teamSizeManaged) : null;
 
   // Upsert: if (email_id, attachment_id) collide, return the existing id.
   const existing = (emailId && attachmentId)
@@ -167,7 +256,19 @@ export function insertResume({
           notice_period     = COALESCE(?, notice_period),
           expected_salary   = COALESCE(?, expected_salary),
           file_path         = COALESCE(?, file_path),
-          content_type      = COALESCE(?, content_type)
+          content_type      = COALESCE(?, content_type),
+          work_locations    = COALESCE(?, work_locations),
+          companies         = COALESCE(?, companies),
+          domains           = COALESCE(?, domains),
+          remote_worked     = COALESCE(?, remote_worked),
+          remote_years      = COALESCE(?, remote_years),
+          remote_evidence   = COALESCE(?, remote_evidence),
+          managed_people    = COALESCE(?, managed_people),
+          team_size_managed = COALESCE(?, team_size_managed),
+          open_to_relocate  = COALESCE(?, open_to_relocate),
+          education_json    = COALESCE(?, education_json),
+          certifications    = COALESCE(?, certifications),
+          publications      = COALESCE(?, publications)
       WHERE id = ?
     `).run(
       category || null, roleTitle || null,
@@ -182,6 +283,10 @@ export function insertResume({
       topSkillsJson, languagesJson,
       c.noticePeriod || null, c.expectedSalary || null,
       filePath || null, contentType || null,
+      workLocsJson, companiesJson, domainsJson,
+      remoteWorked, remoteYears, remoteEvidence,
+      managedPeopleInt, teamSize, openToRelocInt,
+      educationJson, certsJson, publicationsInt,
       existing.id
     );
     return { id: existing.id, isNew: false };
@@ -193,12 +298,20 @@ export function insertResume({
        email, phone, location, linkedin, github, portfolio,
        current_title, current_company, years_experience, highest_education,
        top_skills, languages, notice_period, expected_salary,
-       file_path, content_type)
+       file_path, content_type,
+       work_locations, companies, domains,
+       remote_worked, remote_years, remote_evidence,
+       managed_people, team_size_managed, open_to_relocate,
+       education_json, certifications, publications)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
             ?, ?, ?, ?, ?, ?,
             ?, ?, ?, ?,
             ?, ?, ?, ?,
-            ?, ?)
+            ?, ?,
+            ?, ?, ?,
+            ?, ?, ?,
+            ?, ?, ?,
+            ?, ?, ?)
   `).run(
     emailId || null,
     attachmentId || null,
@@ -217,7 +330,11 @@ export function insertResume({
     c.highestEducation || null,
     topSkillsJson, languagesJson,
     c.noticePeriod || null, c.expectedSalary || null,
-    filePath || null, contentType || null
+    filePath || null, contentType || null,
+    workLocsJson, companiesJson, domainsJson,
+    remoteWorked, remoteYears, remoteEvidence,
+    managedPeopleInt, teamSize, openToRelocInt,
+    educationJson, certsJson, publicationsInt
   );
   return { id: Number(info.lastInsertRowid), isNew: true };
 }
@@ -401,6 +518,117 @@ export function searchChunks({ queryEmbedding, topK = 8, resumeId = null }) {
     ORDER BY distance ASC
     LIMIT ?
   `).all(blob, topK);
+}
+
+// ---------------------------------------------------------------------------
+// BM25 / keyword search over chunks (L4). FTS5 MATCH on the porter-tokenized
+// virtual table. Returns the same shape as searchChunks() so the merger can
+// treat both result sets uniformly.
+
+export function searchChunksBM25({ query, topK = 10, resumeId = null }) {
+  if (!query || !query.trim()) return [];
+  const db = getDb();
+  const ftsQuery = ftsSafeQuery(query);
+  if (!ftsQuery) return [];
+
+  if (resumeId != null) {
+    return db.prepare(`
+      SELECT
+        c.id           AS chunk_id,
+        c.resume_id    AS resume_id,
+        c.chunk_index  AS chunk_index,
+        c.text         AS text,
+        r.candidate_name, r.filename, r.score,
+        bm25(chunks_fts) AS rank_score
+      FROM chunks_fts
+      JOIN chunks  c ON c.id = chunks_fts.rowid
+      JOIN resumes r ON r.id = c.resume_id
+      WHERE chunks_fts MATCH ? AND c.resume_id = ?
+      ORDER BY rank_score ASC
+      LIMIT ?
+    `).all(ftsQuery, resumeId, topK);
+  }
+
+  return db.prepare(`
+    SELECT
+      c.id           AS chunk_id,
+      c.resume_id    AS resume_id,
+      c.chunk_index  AS chunk_index,
+      c.text         AS text,
+      r.candidate_name, r.filename, r.score,
+      bm25(chunks_fts) AS rank_score
+    FROM chunks_fts
+    JOIN chunks  c ON c.id = chunks_fts.rowid
+    JOIN resumes r ON r.id = c.resume_id
+    WHERE chunks_fts MATCH ?
+    ORDER BY rank_score ASC
+    LIMIT ?
+  `).all(ftsQuery, topK);
+}
+
+// FTS5's query syntax has reserved characters (* " : ( ) etc) that throw
+// "fts5: syntax error" if passed raw. Strip them, split on whitespace, drop
+// stopword-y short tokens, and OR the rest together. Returns '' if nothing
+// useful remains -- caller treats as "no BM25 hits".
+function ftsSafeQuery(q) {
+  const tokens = String(q)
+    .toLowerCase()
+    .replace(/[^a-z0-9\s+#./-]/g, ' ')   // keep letters/digits + a few skill-y chars
+    .split(/\s+/)
+    .filter((t) => t.length >= 2)
+    .filter((t) => !FTS_STOPWORDS.has(t))
+    .slice(0, 12);                        // cap to keep query small
+  if (tokens.length === 0) return '';
+  // Quote each token so things like "node.js" don't trip the parser.
+  return tokens.map((t) => `"${t}"`).join(' OR ');
+}
+
+const FTS_STOPWORDS = new Set([
+  'a','an','the','and','or','but','of','for','with','to','in','on','at','by',
+  'is','are','was','were','be','been','being','i','me','my','we','our','you',
+  'who','whom','that','this','these','those','it','its','as','from','do','does',
+  'did','have','has','had','can','could','should','would','will','show','find',
+  'give','list','need','want','one','someone','person','people','candidate',
+  'candidates','resume','resumes','please','any','about','tell','what','which',
+  'where','how','many','some','more','less','than','then','also','etc'
+]);
+
+// Returns the FULL enriched profile for a set of resumes. Used by chat to
+// inject structured data into the LLM context alongside retrieved chunks.
+export function getResumeProfiles(ids) {
+  if (!ids || ids.length === 0) return [];
+  const placeholders = ids.map(() => '?').join(',');
+  return getDb().prepare(`
+    SELECT id, filename, candidate_name, score, category, role_title,
+           email, phone, location, linkedin, github, portfolio,
+           current_title, current_company, years_experience, highest_education,
+           top_skills, languages, notice_period, expected_salary,
+           work_locations, companies, domains,
+           remote_worked, remote_years, remote_evidence,
+           managed_people, team_size_managed, open_to_relocate,
+           education_json, certifications, publications,
+           review_json
+    FROM resumes WHERE id IN (${placeholders})
+  `).all(...ids).map(decodeProfile);
+}
+
+function decodeProfile(r) {
+  if (!r) return r;
+  return {
+    ...r,
+    top_skills:     safeJsonParse(r.top_skills) || [],
+    languages:      safeJsonParse(r.languages) || [],
+    work_locations: safeJsonParse(r.work_locations) || [],
+    companies:      safeJsonParse(r.companies) || [],
+    domains:        safeJsonParse(r.domains) || [],
+    education:      safeJsonParse(r.education_json) || [],
+    certifications: safeJsonParse(r.certifications) || [],
+    remote_worked:    r.remote_worked === 1,
+    managed_people:   r.managed_people === 1,
+    open_to_relocate: r.open_to_relocate === 1,
+    publications:     r.publications === 1,
+    review:           safeJsonParse(r.review_json) || null
+  };
 }
 
 // ---------------------------------------------------------------------------

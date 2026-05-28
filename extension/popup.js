@@ -774,6 +774,21 @@ $('refreshBtn').addEventListener('click', async () => {
   await refreshInbox();
 });
 
+// Auto-score toggle. Bound to chrome.storage.local key auto_score_enabled_v1
+// which background.js checks at the top of runPoll(). Default ON to preserve
+// previous behavior; flip OFF before a demo to avoid the 60s poller burning
+// LLM tokens in the background.
+const AUTO_SCORE_KEY = 'auto_score_enabled_v1';
+(async () => {
+  const obj = await chrome.storage.local.get(AUTO_SCORE_KEY);
+  const enabled = obj[AUTO_SCORE_KEY] !== false; // default true
+  const box = $('autoScoreCheck');
+  if (box) box.checked = enabled;
+})();
+$('autoScoreCheck')?.addEventListener('change', async (e) => {
+  await chrome.storage.local.set({ [AUTO_SCORE_KEY]: e.target.checked });
+});
+
 // Tell the service worker to wipe the toolbar badge counter, since the user
 // is now looking at the inbox.
 try { chrome.runtime.sendMessage({ type: 'auto-score:clear-badge' }, () => void chrome.runtime.lastError); }

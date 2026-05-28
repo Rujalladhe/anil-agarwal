@@ -51,6 +51,11 @@
     <div id="tab-inbox" class="tab-pane">
       <div class="row">
         <button id="refreshBtn" class="secondary">Refresh inbox</button>
+        <label id="autoScoreToggle" class="toggle" title="When ON, the extension polls your inbox every 60s and auto-scores new resumes (burns LLM tokens). Turn OFF to score only the resumes you click on.">
+          <input type="checkbox" id="autoScoreCheck" />
+          <span class="toggle-slider"></span>
+          <span class="toggle-label">Auto-score</span>
+        </label>
         <span id="statusLine" class="muted small"></span>
       </div>
 

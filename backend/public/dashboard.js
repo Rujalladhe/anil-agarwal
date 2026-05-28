@@ -469,7 +469,7 @@ function renderCompaniesChart(rows) {
       datasets: [{
         label: 'Candidates',
         data: rows.map((r) => r.count),
-        backgroundColor: COLOR.accent,
+        backgroundColor: COLOR.primary,
         borderRadius: 4,
         borderSkipped: false,
         maxBarThickness: 22
@@ -700,7 +700,7 @@ async function loadCandidates() {
     $('candidatesStatus').textContent = `${results.length} candidate${results.length === 1 ? '' : 's'}`;
   } catch (err) {
     $('candidatesStatus').textContent = '';
-    body.innerHTML = `<tr><td colspan="6" class="muted">Could not load: ${err.message}</td></tr>`;
+    body.innerHTML = `<tr><td colspan="7" class="muted">Could not load: ${err.message}</td></tr>`;
   }
 }
 
@@ -752,7 +752,7 @@ function renderCandidates(rows) {
   const body = $('candidatesBody');
   body.innerHTML = '';
   if (!rows.length) {
-    body.innerHTML = '<tr><td colspan="6" class="muted">No candidates match.</td></tr>';
+    body.innerHTML = '<tr><td colspan="7" class="muted">No candidates match.</td></tr>';
     return;
   }
   rows.forEach((r, i) => {
@@ -763,6 +763,7 @@ function renderCandidates(rows) {
         <div class="cand-name"></div>
         <div class="cand-role"></div>
       </td>
+      <td class="cell-skills"></td>
       <td class="cell-contact">${contactCell(r)}</td>
       <td class="cell-updated">${fmtUpdated(r.created_at)}</td>
       <td class="cell-score">${scoreRingHTML(r.score)}</td>
@@ -782,6 +783,33 @@ function renderCandidates(rows) {
     `;
     tr.querySelector('.cand-name').textContent = r.candidate_name || r.filename;
     tr.querySelector('.cand-role').textContent = r.role_title || r.current_title || '—';
+    // Skills column — render the top few as chips, click a chip to refilter
+    // the table to that skill (matches the dashboard's clickable chips).
+    const skillsCell = tr.querySelector('.cell-skills');
+    const skills = (r.top_skills || []).slice(0, 4);
+    if (!skills.length) {
+      skillsCell.innerHTML = '<span class="muted">—</span>';
+    } else {
+      for (const s of skills) {
+        const chip = document.createElement('button');
+        chip.type = 'button';
+        chip.className = 'row-skill-chip';
+        chip.title = `Filter by "${s}"`;
+        chip.textContent = s;
+        chip.addEventListener('click', (ev) => {
+          ev.stopPropagation();
+          filterCandidatesBySkill(s);
+        });
+        skillsCell.appendChild(chip);
+      }
+      const extra = (r.top_skills || []).length - skills.length;
+      if (extra > 0) {
+        const more = document.createElement('span');
+        more.className = 'row-skill-more muted';
+        more.textContent = `+${extra}`;
+        skillsCell.appendChild(more);
+      }
+    }
     tr.querySelector('[data-act="view"]').addEventListener('click', () => openCandidate(r.id));
     tr.querySelector('[data-act="chat"]').addEventListener('click', () => startChatForResume(r));
     body.appendChild(tr);

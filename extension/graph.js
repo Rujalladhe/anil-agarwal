@@ -5,16 +5,29 @@ import { getValidToken } from './auth.js';
 
 const GRAPH = 'https://graph.microsoft.com/v1.0';
 
-async function graphGet(path) {
-  const token = await getValidToken();
-  const res = await fetch(`${GRAPH}${path}`, {
-    headers: { Authorization: `Bearer ${token}` }
-  });
-  if (!res.ok) {
-    const txt = await res.text();
-    throw new Error(`Graph GET ${path} -> ${res.status}: ${txt}`);
+async function graphGet(path, { maxRetries = 4 } = {}) {
+  // Graph throttles aggressively (per-mailbox concurrency cap is 4) and
+  // responds 429 with a Retry-After header. Honour it with exponential
+  // fallback for safety.
+  let attempt = 0;
+  while (true) {
+    const token = await getValidToken();
+    const res = await fetch(`${GRAPH}${path}`, {
+      headers: { Authorization: `Bearer ${token}` }
+    });
+    if (res.ok) return res.json();
+
+    const retryable = res.status === 429 || res.status === 503;
+    if (!retryable || attempt >= maxRetries) {
+      const txt = await res.text();
+      throw new Error(`Graph GET ${path} -> ${res.status}: ${txt}`);
+    }
+    const headerWait = Number(res.headers.get('Retry-After')) * 1000;
+    const backoff = Math.min(15000, 500 * 2 ** attempt);
+    const wait = Number.isFinite(headerWait) && headerWait > 0 ? headerWait : backoff;
+    await new Promise((r) => setTimeout(r, wait));
+    attempt++;
   }
-  return res.json();
 }
 
 function isPdfOrDocx(name) {
@@ -45,22 +58,23 @@ export function isResumeByFilename(name) {
 //     messageId, subject, from, receivedDateTime,
 //     attachmentId, filename, contentType, size
 //   }
-export async function listResumeEmails({ topMessages = 25 } = {}) {
-  // Note: Graph rejects `$filter=hasAttachments eq true` combined with
-  // `$orderby=receivedDateTime desc` ("InefficientFilter"). The default order
-  // for /me/messages is already newest-first, and we re-sort client-side at
-  // the bottom of this function anyway, so $orderby is unnecessary.
+export async function listResumeEmails({ topMessages = 75 } = {}) {
+  // We deliberately do NOT use `$filter=hasAttachments eq true`. Some senders
+  // (auto-forwarders, recruiter platforms) attach files with MIME headers
+  // that cause Microsoft to leave `hasAttachments` unset, so the filter hides
+  // messages whose PDFs are clearly visible in Outlook. Scanning more messages
+  // and asking each one for its attachment list is the reliable path.
   const list = await graphGet(
-    `/me/messages?$filter=hasAttachments eq true` +
-    `&$top=${topMessages}` +
-    `&$select=id,subject,from,receivedDateTime`
+    `/me/messages?$top=${topMessages}` +
+    `&$select=id,subject,from,receivedDateTime,hasAttachments`
   );
 
   const messages = list.value || [];
   const out = [];
 
-  // Pull attachments in parallel, but cap concurrency so we don't hammer Graph.
-  const concurrency = 5;
+  // Pull attachments in parallel. Microsoft's per-mailbox concurrency cap is
+  // 4 simultaneous requests, so we stay at 3 to leave headroom for retries.
+  const concurrency = 3;
   let cursor = 0;
   async function worker() {
     while (cursor < messages.length) {
@@ -71,9 +85,12 @@ export async function listResumeEmails({ topMessages = 25 } = {}) {
         );
         for (const a of atts.value || []) {
           if (!isPdfOrDocx(a.name)) continue;
-          // Skip inline attachments (signatures, embedded logos).
-          if (a.isInline) continue;
+          // Inline attachments are usually signatures / embedded logos, but
+          // some forwarders flag genuine resume PDFs as inline. Keep them if
+          // the filename clearly looks like a resume; otherwise skip.
+          if (a.isInline && !isResumeByFilename(a.name)) continue;
           out.push({
+            source: 'outlook',
             messageId: m.id,
             subject: m.subject || '(no subject)',
             from: m.from?.emailAddress?.address || '(unknown sender)',

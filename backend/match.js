@@ -16,12 +16,22 @@ import { searchChunks, getResumeSummaries } from './db.js';
 import { callChatModel } from './chat.js';
 
 // Convert a cosine distance (0 = identical, 1 = orthogonal, ~2 = opposite)
-// into a friendly 0-100 match score. Real-world distances cluster between
-// 0.2 (great) and 0.7 (poor); we stretch that range so the UI has signal.
+// into a friendly 0-100 match score.
+//
+// Calibration notes:
+//   ~0.20 distance = excellent semantic match (full JD vs aligned resume)
+//   ~0.50         = decent / partial match
+//   ~0.80         = weak, query is short/keyword-y
+//   ~0.95+        = essentially unrelated
+//
+// We use 0.20 -> 100 and 0.95 -> 0 (range 0.75) so short keyword queries
+// like "typescript java python" -- which produce vague embeddings and high
+// raw distances -- still surface MEANINGFUL relative scores instead of
+// collapsing everything to 0%. Resume rankings (sort order) are unchanged;
+// only the displayed percentage gets a more honest mid-range.
 function distanceToScore(d) {
   if (!Number.isFinite(d)) return 0;
-  // Map distance 0.15 -> 100, distance 0.75 -> 0, linearly.
-  const norm = Math.max(0, Math.min(1, (0.75 - d) / 0.60));
+  const norm = Math.max(0, Math.min(1, (0.95 - d) / 0.75));
   return Math.round(norm * 100);
 }
 

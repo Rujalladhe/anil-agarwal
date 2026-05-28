@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Resume Scorer · Dashboard</title>
+  <title>InCruiter · Dashboard</title>
   <link rel="stylesheet" href="dashboard.css" />
   <link rel="stylesheet" href="automation.css" />
   <link rel="preconnect" href="https://cdn.jsdelivr.net" />
@@ -14,10 +14,10 @@
 <body>
   <aside class="sidebar">
     <div class="brand">
-      <div class="brand-mark">RS</div>
+      <div class="brand-mark">IC</div>
       <div>
-        <div class="brand-title">Resume Scorer</div>
-        <div class="brand-sub">Recruiter dashboard</div>
+        <div class="brand-title">InCruiter</div>
+        <div class="brand-sub">by Anil Agarwal</div>
       </div>
     </div>
 
@@ -30,6 +30,9 @@
       </button>
       <button class="nav-btn" data-view="match">
         <span class="ico">◇</span>JD Match
+      </button>
+      <button class="nav-btn" data-view="segregate">
+        <span class="ico">▥</span>Segregate
       </button>
       <button class="nav-btn" data-view="chat">
         <span class="ico">◆</span>AI Chat
@@ -237,6 +240,56 @@
 
       <div id="jdStatus" class="muted small jd-status"></div>
       <div id="jdResults" class="jd-results"></div>
+    </section>
+
+    <!-- ===================== SEGREGATE VIEW ===================== -->
+    <section class="view hidden" data-view="segregate">
+      <div class="card seg-intake-card">
+        <div class="card-head">
+          <h3>Job descriptions</h3>
+          <span class="muted small">Add up to 100 JDs — the AI will sort every resume into the best-fit bucket.</span>
+        </div>
+
+        <div class="seg-intake-actions">
+          <button id="segAddBtn" class="btn ghost small" type="button">＋ Add JD</button>
+          <button id="segBulkBtn" class="btn ghost small" type="button">⇩ Bulk paste</button>
+          <label class="btn ghost small seg-upload-label" for="segFileInput">⬆ Upload files</label>
+          <input id="segFileInput" type="file" accept=".pdf,.docx,.txt" multiple hidden />
+          <span class="seg-counter" id="segCounter">0 JDs queued</span>
+          <span class="seg-spacer"></span>
+          <button id="segClearBtn" class="btn ghost small" type="button">Clear all</button>
+        </div>
+
+        <div id="segBulkWrap" class="seg-bulk hidden">
+          <label class="muted small" for="segBulkInput">
+            Paste multiple JDs. Separate each with a line containing only <code>---</code>.
+            The first non-empty line of each block becomes the JD name.
+          </label>
+          <textarea id="segBulkInput" rows="8" placeholder="Senior Backend Engineer&#10;4+ years Node.js / TypeScript on AWS...&#10;---&#10;Mobile Lead (Flutter)&#10;Owns the mobile rewrite, hires the team...&#10;---&#10;Data Analyst – Growth&#10;SQL + dbt, comfortable with Looker..."></textarea>
+          <div class="seg-bulk-actions">
+            <button id="segBulkCancel" class="btn ghost small" type="button">Cancel</button>
+            <button id="segBulkApply"  class="btn primary small" type="button">Add JDs</button>
+          </div>
+        </div>
+
+        <div id="segJdList" class="seg-jd-list"></div>
+      </div>
+
+      <div class="card seg-run-card">
+        <div class="seg-run-row">
+          <label class="seg-thresh">
+            <span class="seg-thresh-label">Min match score</span>
+            <input id="segThreshold" type="range" min="0" max="80" step="5" value="30" />
+            <span id="segThresholdVal" class="seg-thresh-val">30</span>
+          </label>
+          <span class="muted small seg-thresh-hint">Anything below this lands in <strong>Unmatched</strong>.</span>
+          <span class="seg-spacer"></span>
+          <button id="segRunBtn" class="btn primary">▶ Segregate resumes</button>
+        </div>
+        <div id="segStatus" class="muted small seg-status"></div>
+      </div>
+
+      <div id="segResults" class="seg-results"></div>
     </section>
 
     <!-- ===================== CHAT VIEW ===================== -->

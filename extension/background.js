@@ -12,8 +12,13 @@
 // attachment_id), and we keep a local "seen" cache so we don't re-classify
 // or re-score the same attachment more than once.
 
-import { isLoggedIn } from './auth.js';
-import { listResumeEmails, downloadAttachment } from './graph.js';
+import { isLoggedIn as outlookLoggedIn } from './auth.js';
+import { listResumeEmails as listOutlookEmails, downloadAttachment as downloadOutlookAttachment } from './graph.js';
+import {
+  isGmailConnected,
+  listResumeEmails as listGmailEmails,
+  downloadAttachment as downloadGmailAttachment
+} from './gmail.js';
 import { BACKEND_URL } from './config.js';
 
 const ALARM_NAME  = 'inbox-poll';
@@ -79,16 +84,25 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
 // ---------------------------------------------------------------- runner ---
 async function runPoll() {
-  if (!(await getEnabled()))   return 0;
-  if (!(await isLoggedIn()))   return 0;
+  if (!(await getEnabled())) return 0;
 
-  let items;
-  try {
-    items = await listResumeEmails({ topMessages: 15 });
-  } catch (err) {
-    console.warn('[bg] graph list failed:', err.message);
-    return 0;
-  }
+  // Discover which inboxes are connected -- skip whichever isn't.
+  const [hasOutlook, hasGmail] = await Promise.all([
+    outlookLoggedIn().catch(() => false),
+    isGmailConnected().catch(() => false)
+  ]);
+  if (!hasOutlook && !hasGmail) return 0;
+
+  // Fetch each inbox independently; one failing shouldn't block the other.
+  const tasks = [];
+  if (hasOutlook) tasks.push(listOutlookEmails({ topMessages: 15 }).catch((err) => {
+    console.warn('[bg] outlook list failed:', err.message); return [];
+  }));
+  if (hasGmail) tasks.push(listGmailEmails({ topMessages: 15 }).catch((err) => {
+    console.warn('[bg] gmail list failed:', err.message); return [];
+  }));
+  const buckets = await Promise.all(tasks);
+  const items = buckets.flat();
 
   const seen = await getSeen();
   const fresh = items.filter((it) => !(cacheKey(it) in seen));
@@ -97,7 +111,7 @@ async function runPoll() {
   let scoredCount = 0;
   for (const it of fresh) {
     try {
-      const att = await downloadAttachment(it.messageId, it.attachmentId);
+      const att = await downloadFor(it);
 
       // Filename-based hint is fast-path; otherwise ask backend to classify
       // the content first so we don't waste a Groq call on a contract.
@@ -126,6 +140,18 @@ async function runPoll() {
     await bumpBadge(scoredCount);
   }
   return scoredCount;
+}
+
+// Source-aware downloader -- routes to Microsoft Graph or the backend Gmail
+// proxy based on the item's `source` tag.
+async function downloadFor(it) {
+  if (it.source === 'gmail') {
+    return downloadGmailAttachment(it.messageId, it.attachmentId, {
+      filename: it.filename,
+      contentType: it.contentType
+    });
+  }
+  return downloadOutlookAttachment(it.messageId, it.attachmentId);
 }
 
 async function classify(att) {
@@ -162,7 +188,11 @@ async function score(att, item) {
 }
 
 // ------------------------------------------------------------------ utils
-function cacheKey(it) { return `${it.attachmentId}|${it.size}`; }
+function cacheKey(it) {
+  // Source prefix prevents a Gmail attachment id from ever colliding with an
+  // Outlook one in the seen map.
+  return `${it.source || 'outlook'}|${it.attachmentId}|${it.size}`;
+}
 
 async function getEnabled() {
   const obj = await chrome.storage.local.get(ENABLED_KEY);

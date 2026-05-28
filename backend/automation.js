@@ -328,18 +328,30 @@ async function runScheduleInterview(ctx, node, items, cfg) {
 
   const interviewerIds = (cfg.interviewerIds || []).map(Number).filter(Number.isFinite);
   const interviewers   = listInterviewers().filter((iv) => interviewerIds.includes(iv.id));
-  const calendarIds    = interviewers.map((iv) => iv.calendar_id || 'primary');
-  const interviewersEm = interviewers.map((iv) => ({ email: iv.email, displayName: iv.name }));
-  // Each interviewer's stated availability windows. Calendars with an empty
-  // list fall back to dayStart/dayEnd inside findNextFreeSlot.
-  const availabilityWindows = interviewers.map((iv) => ({
-    calendarId: iv.calendar_id || 'primary',
-    windows: iv.availability || []
-  }));
 
   if (interviewers.length === 0) {
     throw new Error('No interviewers selected for the schedule node.');
   }
+
+  // Panel semantics: "pick the FIRST interviewer who has a free slot for this
+  // candidate." NOT "everyone must be free at once" -- that was the old
+  // behaviour and it broke whenever two interviewers' windows didn't overlap.
+  // Spillover across days happens automatically because findNextFreeSlot
+  // already walks the full daysAhead window per interviewer.
+  //
+  // To avoid double-booking the same slot across candidates within one run,
+  // we keep a per-calendar list of already-assigned intervals and pass it as
+  // extraBusy to subsequent findNextFreeSlot calls.
+  const ranBookings = new Map();   // calendarId -> [{ start, end }]
+  const noteBooking = (cid, slot) => {
+    if (!ranBookings.has(cid)) ranBookings.set(cid, []);
+    ranBookings.get(cid).push({ start: new Date(slot.start), end: new Date(slot.end) });
+  };
+
+  const durationMinutes = Number(cfg.durationMinutes) || 30;
+  const dayStart  = cfg.dayStart || '10:00';
+  const dayEnd    = cfg.dayEnd   || '17:00';
+  const daysAhead = Number(cfg.daysAhead) || 7;
 
   const out = [];
   for (const it of items) {
@@ -353,18 +365,19 @@ async function runScheduleInterview(ctx, node, items, cfg) {
     }
 
     if (ctx.mode === 'dry-run') {
-      const stated = availabilityWindows.flatMap((a) => a.windows);
+      const stated = interviewers.flatMap((iv) => iv.availability || []);
       recordAction({
         runId: ctx.runId, resumeId: it.resumeId, candidate: it.name,
         nodeId: node.id, nodeType: node.type,
         status: 'preview',
         detail: {
           summary: `Interview · ${it.name}`,
-          attendees: [it.email, ...interviewersEm.map((iv) => iv.email)],
+          attendees: [it.email, ...interviewers.map((iv) => iv.email)],
           window: stated.length
-            ? `${stated.length} interviewer window(s) honored`
-            : `${cfg.dayStart || '10:00'}–${cfg.dayEnd || '17:00'}, next ${cfg.daysAhead || 7}d (no explicit availability)`,
-          duration: cfg.durationMinutes || 30,
+            ? `${stated.length} interviewer window(s) across ${interviewers.length} interviewer(s) — first free wins`
+            : `${dayStart}–${dayEnd}, next ${daysAhead}d (no explicit availability)`,
+          duration: durationMinutes,
+          mode: 'first-free',
           stated
         }
       });
@@ -374,34 +387,69 @@ async function runScheduleInterview(ctx, node, items, cfg) {
 
     if (!googleConnected()) throw new Error('Calendar scheduling requires Google to be connected.');
 
-    try {
-      const slot = await findNextFreeSlot({
-        calendarIds,
-        durationMinutes: Number(cfg.durationMinutes) || 30,
-        dayStart: cfg.dayStart || '10:00',
-        dayEnd:   cfg.dayEnd   || '17:00',
-        daysAhead: Number(cfg.daysAhead) || 7,
-        timeZone:  interviewers[0].timezone || undefined,
-        availabilityWindows
-      });
-      if (!slot) {
-        const anyStated = availabilityWindows.some((a) => a.windows.length);
-        throw new Error(anyStated
-          ? 'No interviewer-availability slot overlaps for the chosen panel.'
-          : `No free interview slot in the next ${cfg.daysAhead || 7} days.`);
+    // Try each interviewer in order. First one with a free slot wins this
+    // candidate. Each call respects only THAT interviewer's availability
+    // windows, so non-overlapping panels work fine: candidate #1 might land
+    // on Anita, candidate #2 on Rujal, candidate #3 back on Anita's next
+    // free slot the day after.
+    let chosenIv = null;
+    let chosenSlot = null;
+    for (const iv of interviewers) {
+      const cid = iv.calendar_id || 'primary';
+      try {
+        const slot = await findNextFreeSlot({
+          calendarIds: [cid],
+          durationMinutes,
+          dayStart, dayEnd, daysAhead,
+          timeZone:  iv.timezone || undefined,
+          availabilityWindows: [{ calendarId: cid, windows: iv.availability || [] }],
+          extraBusy: ranBookings.get(cid) || []
+        });
+        if (slot) { chosenIv = iv; chosenSlot = slot; break; }
+      } catch (err) {
+        console.warn(`[schedule] findNextFreeSlot failed for ${iv.email}: ${err.message}`);
       }
+    }
 
+    if (!chosenIv) {
+      ctx.summary.totals.errors++;
+      const anyStated = interviewers.some((iv) => (iv.availability || []).length);
+      recordAction({
+        runId: ctx.runId, resumeId: it.resumeId, candidate: it.name,
+        nodeId: node.id, nodeType: node.type,
+        status: 'error',
+        detail: {
+          error: anyStated
+            ? `No free slot in any selected interviewer's stated availability over the next ${daysAhead} days.`
+            : `No free slot in the next ${daysAhead} days for any selected interviewer.`,
+          tried: interviewers.map((iv) => iv.email)
+        }
+      });
+      await sleep(150);
+      continue;
+    }
+
+    try {
+      const cid = chosenIv.calendar_id || 'primary';
       const event = await createMeetEvent({
-        calendarId: interviewers[0].calendar_id || 'primary',
+        calendarId: cid,
         summary: `Interview · ${it.name}${it.roleTitle ? ' · ' + it.roleTitle : ''}`,
         description:
 `Resume score: ${it.score}/100
 Category: ${it.category || '—'}
 Resume on file in Resume Scorer (id #${it.resumeId})`,
-        startIso: slot.start, endIso: slot.end,
-        attendees: [{ email: it.email, displayName: it.name }, ...interviewersEm],
-        timeZone: interviewers[0].timezone || undefined
+        startIso: chosenSlot.start, endIso: chosenSlot.end,
+        attendees: [
+          { email: it.email,        displayName: it.name },
+          { email: chosenIv.email,  displayName: chosenIv.name }
+        ],
+        timeZone: chosenIv.timezone || undefined
       });
+      // Reserve this exact slot on this calendar so no later candidate in
+      // this same run gets booked into it (Calendar's freeBusy may not yet
+      // reflect the event we just created).
+      noteBooking(cid, chosenSlot);
+
       const meetUrl = event.hangoutLink ||
         event.conferenceData?.entryPoints?.find((p) => p.entryPointType === 'video')?.uri ||
         '';
@@ -411,8 +459,9 @@ Resume on file in Resume Scorer (id #${it.resumeId})`,
         status: 'ok',
         detail: {
           eventId: event.id, htmlLink: event.htmlLink, meetUrl,
-          start: slot.start, end: slot.end,
-          interviewers: interviewers.map((iv) => iv.email)
+          start: chosenSlot.start, end: chosenSlot.end,
+          interviewer: chosenIv.email,
+          interviewerName: chosenIv.name
         }
       });
       out.push(it);
@@ -421,7 +470,7 @@ Resume on file in Resume Scorer (id #${it.resumeId})`,
       recordAction({
         runId: ctx.runId, resumeId: it.resumeId, candidate: it.name,
         nodeId: node.id, nodeType: node.type,
-        status: 'error', detail: { error: err.message }
+        status: 'error', detail: { error: err.message, interviewer: chosenIv.email }
       });
     }
     await sleep(150);

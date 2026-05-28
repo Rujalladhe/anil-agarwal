@@ -28,11 +28,15 @@ import { classifyAsResume } from './classify.js';
 import { indexResume } from './rag.js';
 import { chat, chatStream, summarizeText } from './chat.js';
 import { matchJobDescription, matchJobDescriptionWithReasons } from './match.js';
+import { segregateResumes } from './segregate.js';
 import { searchResumes, parseRecruiterQuery, getStats } from './search.js';
 import {
   getDb, insertResume, listResumes, listResumesByCategory, getResume,
-  listResumesForExport, listThreads, getThread, getMessages
+  getResumeByEmailAttachment,
+  listResumesForExport, listThreads, getThread, getMessages,
+  deleteResume, deleteThread
 } from './db.js';
+import { mongoStatus, getMongoDb } from './mongo.js';
 import {
   ensureAutomationSchema, seedDefaults,
   listWorkflows, getWorkflow, createWorkflow, updateWorkflow, deleteWorkflow,
@@ -44,7 +48,9 @@ import {
 import { runWorkflow } from './automation.js';
 import {
   googleConfigured, googleConnected, googleProfile,
-  getAuthUrl, exchangeCode, disconnectGoogle
+  getAuthUrl, exchangeCode, disconnectGoogle,
+  validIanaTimeZone,
+  listGmailResumeEmails, downloadGmailAttachment
 } from './google.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -141,8 +147,31 @@ app.get('/health', (_req, res) => {
     provider: process.env.AI_PROVIDER || 'groq',
     model: process.env.MODEL || '(default)',
     embedProvider: process.env.EMBED_PROVIDER || 'google',
+    mongo: mongoStatus(),
     time: new Date().toISOString()
   });
+});
+
+// Mongo status + manual backfill. Backfill walks every SQLite row in the
+// dual-written tables and upserts it into Mongo. Idempotent (uses _id =
+// SQLite primary key), safe to re-run. Useful the first time the user
+// pastes their MONGODB_URI -- existing data shows up in Mongo immediately.
+app.get('/mongo/status', (_req, res) => {
+  res.json(mongoStatus());
+});
+
+app.post('/mongo/backfill', async (_req, res) => {
+  const db = getMongoDb && (await getMongoDb());
+  if (!db) {
+    return res.status(503).json({ error: 'Mongo not configured or unreachable. Set MONGODB_URI in backend/.env and restart.' });
+  }
+  try {
+    const summary = await backfillMongo(db);
+    res.json({ ok: true, summary });
+  } catch (err) {
+    console.error('[/mongo/backfill] error:', err);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.post('/score', async (req, res) => {
@@ -152,6 +181,36 @@ app.post('/score', async (req, res) => {
   }
 
   try {
+    // Cache hit: this exact (email_id, attachment_id) was already scored.
+    // Skip extractText + scoreResume entirely (the expensive LLM call) and
+    // return the previously stored review. The response shape matches what
+    // the slow path returns -- chunks: 0 because we don't re-index here,
+    // same as the original code's `let indexed = { chunks: 0 }` branch when
+    // isNew was false. Saves the full ~2-4k LLM tokens per duplicate.
+    if (emailId && attachmentId) {
+      const cached = getResumeByEmailAttachment(emailId, attachmentId);
+      if (cached) {
+        const cachedScored = cached.review || {};
+        broadcast('resume:scored', {
+          resumeId: cached.id,
+          candidateName: cached.candidate_name,
+          isNew: false,
+          score: cachedScored.score,
+          category: cachedScored.category,
+          categoryLabel: cachedScored.categoryLabel,
+          roleTitle: cachedScored.roleTitle,
+          filename: cached.filename,
+          ts: Date.now()
+        });
+        return res.json({
+          ...cachedScored,
+          resumeId: cached.id,
+          candidateName: cached.candidate_name,
+          chunks: 0
+        });
+      }
+    }
+
     const buffer = Buffer.from(contentBase64, 'base64');
     const text = await extractText({ filename, contentType, buffer });
 
@@ -469,13 +528,11 @@ app.delete('/resumes/:id', (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id.' });
   try {
-    // ON DELETE CASCADE handles chunks + threads + messages.
-    // chunk_vectors aren't cascaded by FKs (vec0 isn't a regular table),
-    // so we clean them up explicitly.
-    const db = getDb();
-    db.prepare(`DELETE FROM chunk_vectors WHERE rowid IN (SELECT id FROM chunks WHERE resume_id = ?)`).run(id);
-    const info = db.prepare(`DELETE FROM resumes WHERE id = ?`).run(id);
-    res.json({ deleted: info.changes });
+    // db.deleteResume handles chunk_vectors cleanup + ON DELETE CASCADE for
+    // chunks/threads/messages, plus mirrors the delete (and cascades) into
+    // Mongo.
+    const deleted = deleteResume(id);
+    res.json({ deleted });
   } catch (err) {
     console.error('[DELETE /resumes/:id] error:', err);
     res.status(500).json({ error: err.message });
@@ -516,6 +573,76 @@ app.post('/match', async (req, res) => {
   }
 });
 
+// Extract plain text from an uploaded JD file (PDF/DOCX). Used by the
+// Segregate view so users can review/edit the JD before running.
+app.post('/segregate/extract', async (req, res) => {
+  const { filename, contentType, contentBase64 } = req.body || {};
+  if (!contentBase64 || typeof contentBase64 !== 'string') {
+    return res.status(400).json({ error: 'Missing contentBase64.' });
+  }
+  try {
+    const buffer = Buffer.from(contentBase64, 'base64');
+    const text = await extractText({ filename, contentType, buffer });
+    res.json({ text: (text || '').trim() });
+  } catch (err) {
+    console.warn('[/segregate/extract]', err.message);
+    res.status(422).json({ error: err.message || 'Could not extract text.' });
+  }
+});
+
+// Bulk JD segregation. Body:
+//   { jds: [{ name?, text?, filename?, contentType?, contentBase64? }, ...],
+//     threshold? }   // 0-100, default 30
+// Returns: { buckets: [...], unmatched: [...], jdCount, validJdCount, resumeCount }
+//
+// `text` is preferred. If absent and contentBase64 is given (PDF/DOCX), the
+// server extracts the JD text on the fly so the user can upload JD files
+// directly without parsing them in the browser.
+app.post('/segregate', async (req, res) => {
+  const { jds, threshold } = req.body || {};
+  if (!Array.isArray(jds) || jds.length === 0) {
+    return res.status(400).json({ error: 'Send "jds" as a non-empty array.' });
+  }
+  if (jds.length > 100) {
+    return res.status(400).json({ error: 'Max 100 JDs per request.' });
+  }
+
+  try {
+    const prepared = [];
+    for (let i = 0; i < jds.length; i++) {
+      const jd = jds[i] || {};
+      let text = typeof jd.text === 'string' ? jd.text.trim() : '';
+      if (!text && jd.contentBase64) {
+        try {
+          const buffer = Buffer.from(jd.contentBase64, 'base64');
+          text = await extractText({
+            filename: jd.filename || `jd-${i + 1}`,
+            contentType: jd.contentType,
+            buffer
+          });
+        } catch (err) {
+          console.warn(`[/segregate] failed to extract JD #${i + 1}:`, err.message);
+          text = '';
+        }
+      }
+      const name = (jd.name && String(jd.name).trim())
+        || (jd.filename && String(jd.filename).replace(/\.[^.]+$/, ''))
+        || `Job #${i + 1}`;
+      prepared.push({ name, text });
+    }
+
+    const t = Number.isFinite(Number(threshold))
+      ? Math.max(0, Math.min(100, Number(threshold)))
+      : 30;
+
+    const out = await segregateResumes(prepared, { threshold: t });
+    res.json({ ...out, threshold: t });
+  } catch (err) {
+    console.error('[/segregate] error:', err);
+    res.status(500).json({ error: err.message || 'Internal error segregating.' });
+  }
+});
+
 // Recruiter-style natural-language parser endpoint. Useful for showing the
 // user "we read your question as ...". Doesn't call the AI -- pure regex.
 app.post('/parse-query', (req, res) => {
@@ -549,9 +676,8 @@ app.delete('/threads/:id', (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id.' });
   try {
-    const db = getDb();
-    const info = db.prepare('DELETE FROM chat_threads WHERE id = ?').run(id);
-    res.json({ deleted: info.changes });
+    const deleted = deleteThread(id);
+    res.json({ deleted });
   } catch (err) {
     console.error('[DELETE /threads/:id] error:', err);
     res.status(500).json({ error: err.message });
@@ -701,6 +827,85 @@ async function saveAttachment(buffer, filename, contentType) {
   return join('uploads', unique).replace(/\\/g, '/');
 }
 
+// Walk every SQLite row in the dual-written tables and upsert it into Mongo.
+// Idempotent. Bulk-writes per collection to keep the round-trip count small.
+// Decodes JSON-string columns into nested objects so the Mongo docs are
+// queryable (e.g. resumes.top_skills becomes a real array, not a string).
+async function backfillMongo(mdb) {
+  const db = getDb();
+  const counts = {};
+
+  const safeJson = (s) => {
+    if (!s) return null;
+    try { return JSON.parse(s); } catch { return null; }
+  };
+  const bulkUpsert = async (collection, docs) => {
+    if (!docs.length) { counts[collection] = 0; return; }
+    const ops = docs.map((doc) => ({
+      replaceOne: { filter: { _id: doc._id }, replacement: doc, upsert: true }
+    }));
+    const result = await mdb.collection(collection).bulkWrite(ops, { ordered: false });
+    counts[collection] = (result.upsertedCount || 0) + (result.modifiedCount || 0) + (result.matchedCount || 0);
+  };
+
+  // resumes
+  const resumeRows = db.prepare('SELECT * FROM resumes').all();
+  await bulkUpsert('resumes', resumeRows.map((row) => {
+    const doc = {
+      _id: row.id,
+      ...row,
+      top_skills:     safeJson(row.top_skills) || [],
+      languages:      safeJson(row.languages) || [],
+      work_locations: safeJson(row.work_locations) || [],
+      companies:      safeJson(row.companies) || [],
+      domains:        safeJson(row.domains) || [],
+      education:      safeJson(row.education_json) || [],
+      certifications: safeJson(row.certifications) || [],
+      remote_worked:    row.remote_worked === 1,
+      managed_people:   row.managed_people === 1,
+      open_to_relocate: row.open_to_relocate === 1,
+      publications:     row.publications === 1,
+      review:           safeJson(row.review_json) || null
+    };
+    delete doc.review_json;
+    delete doc.education_json;
+    return doc;
+  }));
+
+  // chat threads + messages
+  await bulkUpsert('chat_threads', db.prepare('SELECT * FROM chat_threads').all()
+    .map((r) => ({ _id: r.id, ...r })));
+  await bulkUpsert('chat_messages', db.prepare('SELECT * FROM chat_messages').all()
+    .map((r) => ({ _id: r.id, ...r })));
+
+  // automation
+  await bulkUpsert('workflows', db.prepare('SELECT * FROM workflows').all().map((r) => ({
+    _id: r.id, ...r, enabled: r.enabled === 1, graph: safeJson(r.graph_json) || {}
+  })).map((d) => { delete d.graph_json; return d; }));
+
+  await bulkUpsert('workflow_runs', db.prepare('SELECT * FROM workflow_runs').all().map((r) => ({
+    _id: r.id, ...r, summary: safeJson(r.summary) || {}
+  })));
+
+  await bulkUpsert('workflow_actions', db.prepare('SELECT * FROM workflow_actions').all().map((r) => ({
+    _id: r.id, ...r, detail: safeJson(r.detail_json) || {}
+  })).map((d) => { delete d.detail_json; return d; }));
+
+  await bulkUpsert('interviewers', db.prepare('SELECT * FROM interviewers').all().map((r) => ({
+    _id: r.id, ...r, availability: safeJson(r.availability_json) || []
+  })).map((d) => { delete d.availability_json; return d; }));
+
+  await bulkUpsert('oa_templates', db.prepare('SELECT * FROM oa_templates').all()
+    .map((r) => ({ _id: r.id, ...r })));
+
+  // KV: use the key as _id so the partial unique index in mongo lines up.
+  await bulkUpsert('automation_kv', db.prepare('SELECT * FROM automation_kv').all().map((r) => ({
+    _id: r.k, k: r.k, v: safeJson(r.v) ?? r.v, updated_at: r.updated_at
+  })));
+
+  return counts;
+}
+
 // First non-empty line, capped. Resumes typically start with the candidate's
 // name. Falls back to null if the line looks too long or noisy.
 function guessCandidateName(text) {
@@ -825,6 +1030,63 @@ app.post('/automation/google/disconnect', (_req, res) => {
   res.json({ ok: true });
 });
 
+// --- Gmail (extension-facing: list + download attachments) ---
+//
+// The extension calls these after the user has connected Google via the same
+// /automation/google/* flow used by the automation engine. We deliberately
+// reuse those routes so a user who's already wired up Google for interview
+// scheduling doesn't have to reconnect for Gmail.
+
+app.get('/gmail/status', (_req, res) => {
+  res.json({
+    configured: googleConfigured(),
+    connected:  googleConnected(),
+    profile:    googleProfile()
+  });
+});
+
+// Same auth URL as /automation/google/auth -- aliased here so the extension
+// has a stable Gmail-namespaced URL to point users at.
+app.get('/gmail/auth', (_req, res) => {
+  try { res.json({ url: getAuthUrl('gmail') }); }
+  catch (err) { res.status(400).json({ error: err.message }); }
+});
+
+app.post('/gmail/disconnect', (_req, res) => {
+  disconnectGoogle();
+  res.json({ ok: true });
+});
+
+// List resume-shaped attachments in the user's Gmail inbox. Returns the same
+// item shape as the extension's Outlook listing, plus a `source: 'gmail'` tag.
+app.get('/gmail/messages', async (req, res) => {
+  const top = Number(req.query.top);
+  try {
+    const items = await listGmailResumeEmails({
+      topMessages: Number.isFinite(top) && top > 0 ? top : 75
+    });
+    res.json({ items });
+  } catch (err) {
+    const status = err.status === 401 || /not connected|refresh token/i.test(err.message) ? 401 : 500;
+    console.warn('[/gmail/messages] error:', err.message);
+    res.status(status).json({ error: err.message });
+  }
+});
+
+// Download one Gmail attachment by (messageId, attachmentId). Returns the
+// bytes already base64-encoded so the popup can POST straight to /score.
+app.get('/gmail/attachments/:messageId/:attachmentId', async (req, res) => {
+  try {
+    const { messageId, attachmentId } = req.params;
+    const att = await downloadGmailAttachment(messageId, attachmentId);
+    res.json(att);
+  } catch (err) {
+    const status = err.status === 401 || /not connected|refresh token/i.test(err.message) ? 401 : 500;
+    console.warn('[/gmail/attachments] error:', err.message);
+    res.status(status).json({ error: err.message });
+  }
+});
+
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
 }
@@ -837,6 +1099,13 @@ app.get('/automation/interviewers', (_req, res) => {
 app.post('/automation/interviewers', (req, res) => {
   const { name, email, calendarId, timezone } = req.body || {};
   if (!name || !email) return res.status(400).json({ error: 'name and email are required.' });
+  // Reject obviously-wrong timezones at write time (e.g. "asia") so Google
+  // Calendar never has to throw "Invalid time zone definition". Blank is OK.
+  if (timezone && !validIanaTimeZone(timezone)) {
+    return res.status(400).json({
+      error: `"${timezone}" is not a valid IANA timezone. Examples: "Asia/Kolkata", "America/New_York", "Europe/London".`
+    });
+  }
   const id = createInterviewer({ name, email, calendarId, timezone });
   res.json({ id, interviewers: listInterviewers() });
 });
@@ -894,4 +1163,15 @@ app.listen(PORT, () => {
   console.log(`  ai provider:    ${process.env.AI_PROVIDER || 'groq'}`);
   console.log(`  ai model:       ${process.env.MODEL || '(default)'}`);
   console.log(`  embed provider: ${process.env.EMBED_PROVIDER || 'google'}`);
+  const ms = mongoStatus();
+  if (!ms.configured) {
+    console.log('  mongo:          (disabled — MONGODB_URI not set in backend/.env)');
+  } else {
+    // Trigger the lazy connect now so misconfigured URIs fail loudly at boot
+    // instead of on the first write.
+    getMongoDb().then((db) => {
+      if (db) console.log(`  mongo:          connected (db="${ms.db}")`);
+      else    console.log('  mongo:          configured but unreachable — dual-write disabled');
+    });
+  }
 });

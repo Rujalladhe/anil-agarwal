@@ -6,7 +6,7 @@
   "type": "module",
   "main": "server.js",
   "scripts": {
-    "dev": "node --watch server.js",
+    "dev": "node server.js",
     "start": "node server.js"
   },
   "dependencies": {
@@ -17,6 +17,7 @@
     "exceljs": "^4.4.0",
     "express": "^4.19.2",
     "mammoth": "^1.8.0",
+    "mongodb": "^6.10.0",
     "pdf-parse": "^1.1.1",
     "sqlite-vec": "^0.1.6"
   }

@@ -399,9 +399,40 @@ Rules:
 - Years: "2 yoe" / "2 yrs" / "2 years experience" -> minYears: 2 (interpret as "at least").
 - "fresh grad" / "intern" / "entry level" -> maxYears: 1.`;
 
+// In-memory LRU around the LLM parse call. Same recruiter query asked twice
+// in a session returns the cached parse without burning a second LLM round
+// trip (saves ~150-300 tokens per repeat). Key = lowercased + trimmed query
+// so "React Devs" and "react devs" share an entry. Cap is tiny because the
+// parse output is small and the working set per session is small.
+const PARSER_CACHE = new Map();
+const PARSER_CACHE_MAX = 200;
+
+function parserCacheGet(key) {
+  if (!PARSER_CACHE.has(key)) return undefined;
+  // LRU touch: re-insert moves the key to the end of the iteration order.
+  const val = PARSER_CACHE.get(key);
+  PARSER_CACHE.delete(key);
+  PARSER_CACHE.set(key, val);
+  return val;
+}
+
+function parserCacheSet(key, val) {
+  if (PARSER_CACHE.has(key)) PARSER_CACHE.delete(key);
+  PARSER_CACHE.set(key, val);
+  if (PARSER_CACHE.size > PARSER_CACHE_MAX) {
+    // Evict the oldest entry (first key in iteration order).
+    const oldest = PARSER_CACHE.keys().next().value;
+    PARSER_CACHE.delete(oldest);
+  }
+}
+
 export async function parseRecruiterQueryLLM(query) {
   const raw = String(query || '').trim();
   if (!raw) return { filters: {}, intent: 'ask', raw, source: 'empty' };
+
+  const cacheKey = raw.toLowerCase();
+  const cached = parserCacheGet(cacheKey);
+  if (cached) return cached;
 
   const provider = (process.env.AI_PROVIDER || 'groq').toLowerCase();
   // Allow a smaller / cheaper model just for parsing. Falls back to MODEL.
@@ -411,11 +442,17 @@ export async function parseRecruiterQueryLLM(query) {
     const json = await callParserLLM({ provider, model, query: raw });
     const filters = sanitizeFilters(json);
     const intent = json.intent === 'filter' ? 'filter' : 'ask';
-    return { filters, intent, raw, source: 'llm' };
+    const result = { filters, intent, raw, source: 'llm' };
+    parserCacheSet(cacheKey, result);
+    return result;
   } catch (err) {
     console.warn('[parseRecruiterQueryLLM] LLM parse failed, falling back to regex:', err.message);
     const fallback = parseRecruiterQuery(raw);
-    return { ...fallback, source: 'regex-fallback' };
+    const result = { ...fallback, source: 'regex-fallback' };
+    // Cache the fallback too -- if the LLM call failed once (rate limit,
+    // network), it's likely to fail again. No point hammering it.
+    parserCacheSet(cacheKey, result);
+    return result;
   }
 }
 

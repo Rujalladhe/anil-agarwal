@@ -36,6 +36,7 @@ const VIEW_TITLES = {
   overview:   { title: 'Overview',   sub: 'At-a-glance metrics across every scored resume.' },
   candidates: { title: 'Candidates', sub: 'Search, filter, and inspect every scored resume.' },
   match:      { title: 'JD Match',   sub: 'Paste a job description, get your best-fit candidates ranked.' },
+  segregate:  { title: 'Segregate',  sub: 'Upload many JDs — each resume drops into the bucket it fits best.' },
   chat:       { title: 'AI Chat',    sub: 'Ask anything — across all resumes or about one in particular.' },
   automation: { title: 'Automation', sub: 'Build a node graph that sends OA links, books interviews, and more.' },
   settings:   { title: 'Settings',   sub: 'Backend, extension, integrations, and token-saving notes.' }
@@ -54,6 +55,7 @@ function switchView(name) {
   // Lazy-load per-view data so the dashboard boot is snappy.
   if (name === 'candidates') loadCandidates();
   if (name === 'match')      initMatchIfNeeded();
+  if (name === 'segregate')  initSegregateIfNeeded();
   if (name === 'chat')       initChatIfNeeded();
   if (name === 'automation' && window.initAutomationIfNeeded) window.initAutomationIfNeeded();
   if (name === 'settings')   loadSettings();
@@ -1210,6 +1212,316 @@ function renderJdResults(rows) {
       startChatForResume({ id: r.resumeId, candidate_name: r.candidateName, filename: r.filename }));
     wrap.appendChild(card);
   });
+}
+
+// =================== Segregate (bulk JD bucketing) ===================
+// State holds the user's queued JDs only; the buckets returned by /segregate
+// are rendered straight to the DOM each run and don't need to live here.
+const segState = {
+  inited: false,
+  running: false,
+  jds: [],          // [{ id, name, text, source: 'manual'|'paste'|'file' }]
+  nextId: 1
+};
+
+function initSegregateIfNeeded() {
+  if (segState.inited) return;
+  segState.inited = true;
+
+  $('segAddBtn').addEventListener('click', () => addJd({ source: 'manual' }));
+  $('segClearBtn').addEventListener('click', () => {
+    if (!segState.jds.length) return;
+    if (!confirm('Clear all queued JDs?')) return;
+    segState.jds = [];
+    renderJdList();
+  });
+  $('segBulkBtn').addEventListener('click', () => {
+    const wrap = $('segBulkWrap');
+    wrap.classList.toggle('hidden');
+    if (!wrap.classList.contains('hidden')) $('segBulkInput').focus();
+  });
+  $('segBulkCancel').addEventListener('click', () => {
+    $('segBulkWrap').classList.add('hidden');
+    $('segBulkInput').value = '';
+  });
+  $('segBulkApply').addEventListener('click', applyBulkPaste);
+
+  $('segFileInput').addEventListener('change', async (e) => {
+    const files = Array.from(e.target.files || []);
+    e.target.value = ''; // allow re-selecting the same file
+    if (!files.length) return;
+    await loadJdFiles(files);
+  });
+
+  const threshEl = $('segThreshold');
+  threshEl.addEventListener('input', () => { $('segThresholdVal').textContent = threshEl.value; });
+
+  $('segRunBtn').addEventListener('click', runSegregation);
+
+  renderJdList();
+}
+
+function addJd({ name = '', text = '', source = 'manual', expanded = true } = {}) {
+  const jd = { id: segState.nextId++, name, text, source, expanded };
+  segState.jds.push(jd);
+  renderJdList();
+  return jd;
+}
+
+function renderJdList() {
+  const wrap = $('segJdList');
+  wrap.innerHTML = '';
+  $('segCounter').textContent = `${segState.jds.length} JD${segState.jds.length === 1 ? '' : 's'} queued`;
+
+  if (!segState.jds.length) {
+    const empty = document.createElement('div');
+    empty.className = 'seg-empty';
+    empty.innerHTML = `
+      <div class="seg-empty-title">No JDs yet</div>
+      <div class="seg-empty-sub">Click <strong>+ Add JD</strong>, paste a batch, or drop in <code>.pdf</code> / <code>.docx</code> / <code>.txt</code> files.</div>
+    `;
+    wrap.appendChild(empty);
+    return;
+  }
+
+  segState.jds.forEach((jd, i) => {
+    const row = document.createElement('div');
+    row.className = 'seg-jd-row' + (jd.expanded ? ' expanded' : '');
+    row.dataset.id = String(jd.id);
+
+    const charCount = jd.text ? jd.text.length : 0;
+    const tooShort  = charCount < 20;
+
+    row.innerHTML = `
+      <div class="seg-jd-head">
+        <div class="seg-jd-rank">${i + 1}</div>
+        <input class="seg-jd-name" type="text" placeholder="Job title (e.g. Senior Backend Engineer)" />
+        <span class="seg-jd-meta ${tooShort ? 'warn' : ''}">${charCount} chars${tooShort ? ' · too short' : ''}</span>
+        <button class="seg-jd-toggle" type="button" title="Expand / collapse">${jd.expanded ? '▾' : '▸'}</button>
+        <button class="seg-jd-del" type="button" title="Remove this JD">×</button>
+      </div>
+      <textarea class="seg-jd-text" rows="6" placeholder="Paste the job description here..."></textarea>
+    `;
+
+    const nameEl = row.querySelector('.seg-jd-name');
+    const textEl = row.querySelector('.seg-jd-text');
+    nameEl.value = jd.name;
+    textEl.value = jd.text;
+
+    nameEl.addEventListener('input', () => { jd.name = nameEl.value; });
+    textEl.addEventListener('input', () => {
+      jd.text = textEl.value;
+      const meta = row.querySelector('.seg-jd-meta');
+      const n = jd.text.length;
+      const short = n < 20;
+      meta.textContent = `${n} chars${short ? ' · too short' : ''}`;
+      meta.classList.toggle('warn', short);
+    });
+    row.querySelector('.seg-jd-toggle').addEventListener('click', () => {
+      jd.expanded = !jd.expanded;
+      row.classList.toggle('expanded', jd.expanded);
+      row.querySelector('.seg-jd-toggle').textContent = jd.expanded ? '▾' : '▸';
+    });
+    row.querySelector('.seg-jd-del').addEventListener('click', () => {
+      segState.jds = segState.jds.filter((x) => x.id !== jd.id);
+      renderJdList();
+    });
+
+    wrap.appendChild(row);
+  });
+}
+
+function applyBulkPaste() {
+  const raw = $('segBulkInput').value;
+  if (!raw.trim()) return;
+  // Split on a line containing only --- or === (with optional whitespace).
+  const blocks = raw.split(/\n\s*(?:-{3,}|={3,})\s*\n/g).map((b) => b.trim()).filter(Boolean);
+  let added = 0;
+  for (const block of blocks) {
+    const lines = block.split('\n');
+    const firstNonEmpty = lines.find((l) => l.trim()) || '';
+    let name = firstNonEmpty.trim().slice(0, 80);
+    let text = block;
+    // If the first line is short and looks like a title, strip it from the body.
+    if (name.length <= 80 && lines.length > 1 && firstNonEmpty.length < 100) {
+      const idx = lines.indexOf(firstNonEmpty);
+      text = lines.slice(idx + 1).join('\n').trim();
+      if (!text) text = block;
+    } else {
+      name = `Pasted JD ${segState.jds.length + added + 1}`;
+    }
+    addJd({ name, text, source: 'paste', expanded: false });
+    added++;
+  }
+  $('segBulkInput').value = '';
+  $('segBulkWrap').classList.add('hidden');
+  if (added > 0) toast(`Added ${added} JD${added === 1 ? '' : 's'} from paste.`, 'success');
+}
+
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = String(reader.result || '');
+      const comma = result.indexOf(',');
+      resolve(comma === -1 ? result : result.slice(comma + 1));
+    };
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
+}
+
+async function loadJdFiles(files) {
+  let added = 0, skipped = 0;
+  for (const file of files) {
+    const lower = file.name.toLowerCase();
+    const baseName = file.name.replace(/\.[^.]+$/, '');
+    try {
+      if (lower.endsWith('.txt')) {
+        const text = await file.text();
+        if (text.trim().length < 20) { skipped++; continue; }
+        addJd({ name: baseName, text: text.trim(), source: 'file', expanded: false });
+        added++;
+      } else if (lower.endsWith('.pdf') || lower.endsWith('.docx')) {
+        // PDFs/DOCX can't be parsed in the browser cleanly — round-trip to the
+        // backend's extractor and store the resulting text in the JD row.
+        const contentBase64 = await fileToBase64(file);
+        const out = await fetch('/segregate/extract', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            filename: file.name,
+            contentType: file.type,
+            contentBase64
+          })
+        }).then((r) => r.json());
+        if (out.error || !out.text || out.text.trim().length < 20) {
+          skipped++;
+          continue;
+        }
+        addJd({ name: baseName, text: out.text.trim(), source: 'file', expanded: false });
+        added++;
+      } else {
+        skipped++;
+      }
+    } catch (err) {
+      console.warn('JD file load failed:', file.name, err);
+      skipped++;
+    }
+  }
+  if (added)   toast(`Loaded ${added} JD${added === 1 ? '' : 's'} from file${added === 1 ? '' : 's'}.`, 'success');
+  if (skipped) toast(`Skipped ${skipped} file${skipped === 1 ? '' : 's'} (unsupported or too short).`, 'error');
+}
+
+async function runSegregation() {
+  if (segState.running) return;
+  const usable = segState.jds.filter((j) => (j.text || '').trim().length >= 20);
+  if (!usable.length) {
+    toast('Add at least one JD with 20+ characters.', 'error');
+    return;
+  }
+  const threshold = Number($('segThreshold').value) || 0;
+  segState.running = true;
+  $('segRunBtn').disabled = true;
+  $('segResults').innerHTML = '';
+  $('segStatus').textContent = `Embedding ${usable.length} JD${usable.length === 1 ? '' : 's'} and sorting resumes…`;
+
+  try {
+    const t0 = performance.now();
+    const out = await api('/segregate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        threshold,
+        jds: segState.jds.map((j) => ({ name: j.name || '', text: j.text || '' }))
+      })
+    });
+    const ms = Math.round(performance.now() - t0);
+    renderSegResults(out);
+    const total = (out.buckets || []).reduce((a, b) => a + b.candidates.length, 0);
+    $('segStatus').textContent = `Sorted ${total} candidate${total === 1 ? '' : 's'} across ${out.validJdCount}/${out.jdCount} JDs · ${out.unmatched.length} unmatched · ${ms} ms.`;
+  } catch (err) {
+    $('segStatus').textContent = `Could not segregate: ${err.message}`;
+  } finally {
+    segState.running = false;
+    $('segRunBtn').disabled = false;
+  }
+}
+
+function renderSegResults(out) {
+  const wrap = $('segResults');
+  wrap.innerHTML = '';
+  const buckets = out.buckets || [];
+  if (!buckets.length) {
+    const empty = document.createElement('div');
+    empty.className = 'seg-results-empty';
+    empty.textContent = 'No JDs were valid. Make sure each JD has at least 20 characters.';
+    wrap.appendChild(empty);
+    return;
+  }
+
+  const grid = document.createElement('div');
+  grid.className = 'seg-bucket-grid';
+
+  const allBuckets = [...buckets];
+  allBuckets.push({
+    jdIndex: -1,
+    jdName: 'Unmatched',
+    candidates: out.unmatched || [],
+    _unmatched: true
+  });
+
+  allBuckets.forEach((b) => {
+    const col = document.createElement('div');
+    col.className = 'seg-bucket' + (b._unmatched ? ' unmatched' : '');
+    const n = b.candidates.length;
+    col.innerHTML = `
+      <div class="seg-bucket-head">
+        <div class="seg-bucket-title"></div>
+        <span class="seg-bucket-count">${n}</span>
+      </div>
+      <div class="seg-bucket-body"></div>
+    `;
+    col.querySelector('.seg-bucket-title').textContent = b.jdName || `Job #${b.jdIndex + 1}`;
+
+    const body = col.querySelector('.seg-bucket-body');
+    if (!n) {
+      const empty = document.createElement('div');
+      empty.className = 'seg-bucket-empty';
+      empty.textContent = b._unmatched ? 'Everyone matched.' : 'No candidates fit above the threshold.';
+      body.appendChild(empty);
+    } else {
+      b.candidates.forEach((c) => {
+        const card = document.createElement('div');
+        card.className = 'seg-cand';
+        const band = scoreBand(c.score || 0);
+        const fitBand = c.matchScore >= 70 ? 'good' : c.matchScore >= 45 ? 'warn' : 'bad';
+        const runnerName = c.runnerUp
+          ? (allBuckets.find((bb) => bb.jdIndex === c.runnerUp.jdIndex)?.jdName || `Job #${c.runnerUp.jdIndex + 1}`)
+          : '';
+        card.innerHTML = `
+          <div class="seg-cand-top">
+            <div class="seg-cand-name"></div>
+            <span class="seg-cand-fit ${fitBand}">${c.matchScore}%</span>
+          </div>
+          <div class="seg-cand-meta">
+            <span class="score-pill ${band}">${c.score ?? '—'}</span>
+            <span class="seg-cand-cat"></span>
+          </div>
+          ${runnerName ? `<div class="seg-cand-runner">also fits: <span></span> · ${c.runnerUp.matchScore}%</div>` : ''}
+        `;
+        card.querySelector('.seg-cand-name').textContent = c.candidateName || c.filename || `Resume #${c.resumeId}`;
+        card.querySelector('.seg-cand-cat').textContent = c.category || '';
+        if (runnerName) card.querySelector('.seg-cand-runner span').textContent = runnerName;
+        card.addEventListener('click', () => openCandidate(c.resumeId));
+        body.appendChild(card);
+      });
+    }
+
+    grid.appendChild(col);
+  });
+
+  wrap.appendChild(grid);
 }
 
 // =================== Live updates (SSE) ===================

@@ -9,6 +9,10 @@
 //   oa_templates      — reusable OA email bodies (Mustache-ish placeholders)
 
 import { getDb } from './db.js';
+import {
+  mongoUpsertById, mongoUpdateById, mongoDeleteById, mongoDeleteMany,
+  mongoKvSet, mongoKvDel
+} from './mongo.js';
 
 export function ensureAutomationSchema() {
   const db = getDb();
@@ -95,10 +99,14 @@ export function kvSet(k, value) {
     INSERT INTO automation_kv (k, v, updated_at) VALUES (?, ?, ?)
     ON CONFLICT(k) DO UPDATE SET v=excluded.v, updated_at=excluded.updated_at
   `).run(k, v, Date.now());
+  // Mirror to Mongo. Store the decoded value (object/array) rather than the
+  // JSON string so it's queryable inside Mongo's shell / Atlas UI.
+  mongoKvSet(k, value);
 }
 
 export function kvDel(k) {
   getDb().prepare('DELETE FROM automation_kv WHERE k = ?').run(k);
+  mongoKvDel(k);
 }
 
 // --- workflows -----------------------------------------------------------
@@ -132,13 +140,20 @@ export function createWorkflow({ name, description = '', graph = DEFAULT_GRAPH()
     INSERT INTO workflows (name, description, graph_json, enabled, created_at, updated_at)
     VALUES (?, ?, ?, 1, ?, ?)
   `).run(name, description || '', JSON.stringify(graph), now, now);
-  return Number(info.lastInsertRowid);
+  const id = Number(info.lastInsertRowid);
+  // Mongo mirror: store the decoded graph object so it's queryable.
+  mongoUpsertById('workflows', id, {
+    id, name, description: description || '', graph, enabled: true,
+    created_at: now, updated_at: now
+  });
+  return id;
 }
 
 export function updateWorkflow(id, { name, description, graph, enabled }) {
   const db = getDb();
   const current = db.prepare('SELECT * FROM workflows WHERE id = ?').get(id);
   if (!current) return false;
+  const updatedAt = Date.now();
   const next = {
     name: name ?? current.name,
     description: description ?? current.description ?? '',
@@ -149,34 +164,57 @@ export function updateWorkflow(id, { name, description, graph, enabled }) {
     UPDATE workflows
     SET name = ?, description = ?, graph_json = ?, enabled = ?, updated_at = ?
     WHERE id = ?
-  `).run(next.name, next.description, next.graph_json, next.enabled, Date.now(), id);
+  `).run(next.name, next.description, next.graph_json, next.enabled, updatedAt, id);
+  mongoUpdateById('workflows', id, {
+    name: next.name,
+    description: next.description,
+    graph: safeJson(next.graph_json) || {},
+    enabled: next.enabled === 1,
+    updated_at: updatedAt
+  });
   return true;
 }
 
 export function deleteWorkflow(id) {
-  return getDb().prepare('DELETE FROM workflows WHERE id = ?').run(id).changes;
+  const changes = getDb().prepare('DELETE FROM workflows WHERE id = ?').run(id).changes;
+  mongoDeleteById('workflows', id);
+  // Mongo has no cascading FKs -- drop child runs + actions ourselves.
+  mongoDeleteMany('workflow_runs', { workflow_id: id });
+  mongoDeleteMany('workflow_actions', { workflow_id: id });
+  return changes;
 }
 
 // --- runs ----------------------------------------------------------------
 
 export function createRun({ workflowId, mode }) {
+  const startedAt = Date.now();
   const info = getDb().prepare(`
     INSERT INTO workflow_runs (workflow_id, mode, status, summary, started_at)
     VALUES (?, ?, 'running', NULL, ?)
-  `).run(workflowId, mode, Date.now());
-  return Number(info.lastInsertRowid);
+  `).run(workflowId, mode, startedAt);
+  const id = Number(info.lastInsertRowid);
+  mongoUpsertById('workflow_runs', id, {
+    id, workflow_id: workflowId, mode, status: 'running',
+    summary: null, started_at: startedAt, finished_at: null
+  });
+  return id;
 }
 
 export function finalizeRun(runId, { status, summary }) {
+  const finishedAt = Date.now();
   getDb().prepare(`
     UPDATE workflow_runs
     SET status = ?, summary = ?, finished_at = ?
     WHERE id = ?
-  `).run(status, JSON.stringify(summary || {}), Date.now(), runId);
+  `).run(status, JSON.stringify(summary || {}), finishedAt, runId);
+  mongoUpdateById('workflow_runs', runId, {
+    status, summary: summary || {}, finished_at: finishedAt
+  });
 }
 
 export function recordAction({ runId, resumeId, candidate, nodeId, nodeType, status, detail }) {
-  getDb().prepare(`
+  const createdAt = Date.now();
+  const info = getDb().prepare(`
     INSERT INTO workflow_actions (run_id, resume_id, candidate, node_id, node_type, status, detail_json, created_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
@@ -187,8 +225,14 @@ export function recordAction({ runId, resumeId, candidate, nodeId, nodeType, sta
     nodeType,
     status,
     JSON.stringify(detail || {}),
-    Date.now()
+    createdAt
   );
+  const id = Number(info.lastInsertRowid);
+  mongoUpsertById('workflow_actions', id, {
+    id, run_id: runId, resume_id: resumeId ?? null,
+    candidate: candidate || null, node_id: nodeId, node_type: nodeType,
+    status, detail: detail || {}, created_at: createdAt
+  });
 }
 
 export function listRuns({ workflowId, limit = 30 } = {}) {
@@ -245,14 +289,25 @@ function decodeInterviewer(r) {
   return { ...r, availability: windows };
 }
 export function createInterviewer({ name, email, calendarId, timezone }) {
+  const createdAt = Date.now();
   const info = getDb().prepare(`
     INSERT INTO interviewers (name, email, calendar_id, timezone, availability_json, created_at)
     VALUES (?, ?, ?, ?, '[]', ?)
-  `).run(name, email, calendarId || 'primary', timezone || null, Date.now());
-  return Number(info.lastInsertRowid);
+  `).run(name, email, calendarId || 'primary', timezone || null, createdAt);
+  const id = Number(info.lastInsertRowid);
+  mongoUpsertById('interviewers', id, {
+    id, name, email,
+    calendar_id: calendarId || 'primary',
+    timezone: timezone || null,
+    availability: [],
+    created_at: createdAt
+  });
+  return id;
 }
 export function deleteInterviewer(id) {
-  return getDb().prepare('DELETE FROM interviewers WHERE id = ?').run(id).changes;
+  const changes = getDb().prepare('DELETE FROM interviewers WHERE id = ?').run(id).changes;
+  mongoDeleteById('interviewers', id);
+  return changes;
 }
 
 // Availability window helpers. Each window: { id, start, end } (ISO strings).
@@ -269,6 +324,7 @@ export function addAvailabilityWindow(interviewerId, { start, end }) {
     .sort((a, b) => Date.parse(a.start) - Date.parse(b.start));
   getDb().prepare('UPDATE interviewers SET availability_json = ? WHERE id = ?')
     .run(JSON.stringify(next), interviewerId);
+  mongoUpdateById('interviewers', interviewerId, { availability: next });
   return { id: winId, windows: next };
 }
 export function removeAvailabilityWindow(interviewerId, windowId) {
@@ -277,6 +333,7 @@ export function removeAvailabilityWindow(interviewerId, windowId) {
   const next = (iv.availability || []).filter((w) => w.id !== windowId);
   getDb().prepare('UPDATE interviewers SET availability_json = ? WHERE id = ?')
     .run(JSON.stringify(next), interviewerId);
+  mongoUpdateById('interviewers', interviewerId, { availability: next });
   return 1;
 }
 
@@ -294,25 +351,34 @@ export function createTemplate({ name, subject, body, oaLink }) {
     INSERT INTO oa_templates (name, subject, body, oa_link, created_at, updated_at)
     VALUES (?, ?, ?, ?, ?, ?)
   `).run(name, subject, body, oaLink || null, now, now);
-  return Number(info.lastInsertRowid);
+  const id = Number(info.lastInsertRowid);
+  mongoUpsertById('oa_templates', id, {
+    id, name, subject, body, oa_link: oaLink || null,
+    created_at: now, updated_at: now
+  });
+  return id;
 }
 export function updateTemplate(id, { name, subject, body, oaLink }) {
   const cur = getTemplate(id);
   if (!cur) return false;
+  const updatedAt = Date.now();
+  const next = {
+    name: name ?? cur.name,
+    subject: subject ?? cur.subject,
+    body: body ?? cur.body,
+    oa_link: oaLink ?? cur.oa_link
+  };
   getDb().prepare(`
     UPDATE oa_templates SET name = ?, subject = ?, body = ?, oa_link = ?, updated_at = ?
     WHERE id = ?
-  `).run(
-    name ?? cur.name,
-    subject ?? cur.subject,
-    body ?? cur.body,
-    oaLink ?? cur.oa_link,
-    Date.now(), id
-  );
+  `).run(next.name, next.subject, next.body, next.oa_link, updatedAt, id);
+  mongoUpdateById('oa_templates', id, { ...next, updated_at: updatedAt });
   return true;
 }
 export function deleteTemplate(id) {
-  return getDb().prepare('DELETE FROM oa_templates WHERE id = ?').run(id).changes;
+  const changes = getDb().prepare('DELETE FROM oa_templates WHERE id = ?').run(id).changes;
+  mongoDeleteById('oa_templates', id);
+  return changes;
 }
 
 // --- seeding -------------------------------------------------------------

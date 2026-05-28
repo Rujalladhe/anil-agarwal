@@ -13,6 +13,9 @@ import Database from 'better-sqlite3';
 import * as sqliteVec from 'sqlite-vec';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import {
+  mongoUpsertById, mongoUpdateById, mongoDeleteById, mongoDeleteMany
+} from './mongo.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DB_PATH = process.env.DB_PATH || join(__dirname, 'data.db');
@@ -289,6 +292,9 @@ export function insertResume({
       educationJson, certsJson, publicationsInt,
       existing.id
     );
+    // Mirror the up-to-date row into Mongo. Fire-and-forget; the mongo helper
+    // logs on failure and never throws so we don't block the user request.
+    mirrorResumeToMongo(existing.id);
     return { id: existing.id, isNew: false };
   }
 
@@ -336,7 +342,69 @@ export function insertResume({
     managedPeopleInt, teamSize, openToRelocInt,
     educationJson, certsJson, publicationsInt
   );
-  return { id: Number(info.lastInsertRowid), isNew: true };
+  const newId = Number(info.lastInsertRowid);
+  mirrorResumeToMongo(newId);
+  return { id: newId, isNew: true };
+}
+
+// Public re-mirror trigger. Exposed so maintenance scripts (rescore.js) that
+// hit the resumes table directly with raw SQL can still push the updated row
+// into Mongo without going through insertResume.
+export function remirrorResume(resumeId) {
+  mirrorResumeToMongo(resumeId);
+}
+
+// Build a Mongo doc from the freshly-saved SQLite row and upsert it. Reads
+// the row back instead of reconstructing it from the function args so the
+// mirrored shape always matches what's actually persisted (including any
+// COALESCE'd fields on update). Fire-and-forget; never throws.
+function mirrorResumeToMongo(resumeId) {
+  try {
+    const row = getDb().prepare('SELECT * FROM resumes WHERE id = ?').get(resumeId);
+    if (!row) return;
+    const doc = {
+      ...row,
+      // Decode JSON-encoded list fields so the Mongo document is queryable.
+      top_skills:     safeJsonParse(row.top_skills) || [],
+      languages:      safeJsonParse(row.languages) || [],
+      work_locations: safeJsonParse(row.work_locations) || [],
+      companies:      safeJsonParse(row.companies) || [],
+      domains:        safeJsonParse(row.domains) || [],
+      education:      safeJsonParse(row.education_json) || [],
+      certifications: safeJsonParse(row.certifications) || [],
+      remote_worked:    row.remote_worked === 1,
+      managed_people:   row.managed_people === 1,
+      open_to_relocate: row.open_to_relocate === 1,
+      publications:     row.publications === 1,
+      review:           safeJsonParse(row.review_json) || null
+    };
+    // Drop the duplicated JSON string fields; the decoded shapes above are
+    // friendlier for Mongo querying.
+    delete doc.review_json;
+    delete doc.education_json;
+    // Use the SQLite id as the Mongo _id so both stores share a primary key.
+    mongoUpsertById('resumes', resumeId, doc);
+  } catch (err) {
+    console.warn(`[db] mirrorResumeToMongo(${resumeId}) failed: ${err.message}`);
+  }
+}
+
+// Cascading resume delete: chunks + chunk_vectors stay in SQLite (vector
+// retrieval still uses them), but the resume row itself and any chat
+// threads/messages tied to it are removed from BOTH stores.
+export function deleteResume(id) {
+  const db = getDb();
+  // chunk_vectors aren't cascaded by FKs (vec0 isn't a regular table), so
+  // clean them up explicitly first.
+  db.prepare(`DELETE FROM chunk_vectors WHERE rowid IN (SELECT id FROM chunks WHERE resume_id = ?)`).run(id);
+  const info = db.prepare(`DELETE FROM resumes WHERE id = ?`).run(id);
+  // Mongo mirror: drop the resume, plus any threads + messages that pointed
+  // at it. SQLite handled this via ON DELETE CASCADE; Mongo has no FKs so we
+  // do the cascade ourselves.
+  mongoDeleteById('resumes', id);
+  mongoDeleteMany('chat_threads', { resume_id: id });
+  mongoDeleteMany('chat_messages', { resume_id: id });
+  return info.changes;
 }
 
 export function listResumes() {
@@ -392,6 +460,19 @@ export function listResumesByCategory() {
 
 export function getResume(id) {
   const row = getDb().prepare('SELECT * FROM resumes WHERE id = ?').get(id);
+  if (!row) return null;
+  return { ...row, review: JSON.parse(row.review_json) };
+}
+
+// Cache-lookup for /score: same (email_id, attachment_id) means same file
+// bytes from the same message, so the prior AI review is still valid. Used to
+// skip the expensive scoreResume() LLM call when the auto-poller re-sends an
+// attachment we've already processed.
+export function getResumeByEmailAttachment(emailId, attachmentId) {
+  if (!emailId || !attachmentId) return null;
+  const row = getDb().prepare(
+    'SELECT * FROM resumes WHERE email_id = ? AND attachment_id = ?'
+  ).get(emailId, attachmentId);
   if (!row) return null;
   return { ...row, review: JSON.parse(row.review_json) };
 }
@@ -635,10 +716,24 @@ function decodeProfile(r) {
 // Chat threads + messages
 
 export function createThread({ resumeId = null, title = null }) {
+  const createdAt = Date.now();
   const info = getDb().prepare(`
     INSERT INTO chat_threads (resume_id, title, created_at) VALUES (?, ?, ?)
-  `).run(resumeId, title, Date.now());
-  return Number(info.lastInsertRowid);
+  `).run(resumeId, title, createdAt);
+  const id = Number(info.lastInsertRowid);
+  mongoUpsertById('chat_threads', id, {
+    id, resume_id: resumeId, title, created_at: createdAt
+  });
+  return id;
+}
+
+// Delete a thread + cascade its messages. Mongo doesn't auto-cascade so we
+// remove the messages explicitly.
+export function deleteThread(id) {
+  const info = getDb().prepare('DELETE FROM chat_threads WHERE id = ?').run(id);
+  mongoDeleteById('chat_threads', id);
+  mongoDeleteMany('chat_messages', { thread_id: id });
+  return info.changes;
 }
 
 export function listThreads() {
@@ -663,10 +758,15 @@ export function getThread(id) {
 }
 
 export function appendMessage({ threadId, role, content }) {
+  const createdAt = Date.now();
   const info = getDb().prepare(`
     INSERT INTO chat_messages (thread_id, role, content, created_at) VALUES (?, ?, ?, ?)
-  `).run(threadId, role, content, Date.now());
-  return Number(info.lastInsertRowid);
+  `).run(threadId, role, content, createdAt);
+  const id = Number(info.lastInsertRowid);
+  mongoUpsertById('chat_messages', id, {
+    id, thread_id: threadId, role, content, created_at: createdAt
+  });
+  return id;
 }
 
 export function getMessages(threadId, { limit = 50 } = {}) {
@@ -680,4 +780,5 @@ export function getMessages(threadId, { limit = 50 } = {}) {
 
 export function setThreadTitle(threadId, title) {
   getDb().prepare('UPDATE chat_threads SET title = ? WHERE id = ?').run(title, threadId);
+  mongoUpdateById('chat_threads', threadId, { title });
 }

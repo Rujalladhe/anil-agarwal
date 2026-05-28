@@ -15,7 +15,7 @@
 // if we burst slightly we recover automatically.
 
 import 'dotenv/config';
-import { getDb } from './db.js';
+import { getDb, remirrorResume } from './db.js';
 import { scoreResume } from './ai.js';
 import { indexResume } from './rag.js';
 
@@ -138,6 +138,11 @@ async function main() {
         boolToInt(c.publications),
         r.id
       );
+
+      // Push the refreshed row into Mongo too. Dual-write happens automatically
+      // for insertResume, but this script uses a direct UPDATE so we mirror
+      // explicitly. No-op when MONGODB_URI is unset.
+      remirrorResume(r.id);
 
       // Re-index chunks too unless skipped. raw_text didn't change, so this
       // is mostly to ensure FTS5 is populated for resumes scored before FTS

@@ -175,6 +175,47 @@ button:disabled { opacity: 0.55; cursor: not-allowed; }
 }
 .secondary:hover:not(:disabled) { background: var(--panel-2); border-color: #d6d3cc; }
 
+/* ===================== Connect picker (auth panel) ===================== */
+.connect-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 12px 0;
+}
+.connect-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 11px 12px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius);
+  background: var(--panel);
+}
+.connect-row.connected {
+  border-color: #c8ddd2;
+  background: var(--primary-soft);
+}
+.connect-info { min-width: 0; }
+.connect-name {
+  font-weight: 600;
+  font-size: 13px;
+}
+.connect-status { margin-top: 2px; }
+.connect-row .secondary { padding: 6px 12px; font-size: 12px; }
+
+/* Source badge that tags each card with where the resume came from. */
+.badge-source {
+  background: var(--panel-2);
+  color: var(--text-soft);
+  border-color: var(--border);
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 500;
+}
+.badge-source.outlook { background: #e6efff; color: #1d4f9a; border-color: #c4d6f4; }
+.badge-source.gmail   { background: #fde9e6; color: #a8351f; border-color: #f5cbc3; }
+
 /* ===================== Error / empty ===================== */
 .error {
   color: var(--bad);

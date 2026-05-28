@@ -25,7 +25,10 @@ const SCOPES = [
   'profile',
   'https://www.googleapis.com/auth/calendar.events',
   'https://www.googleapis.com/auth/calendar.readonly',
-  'https://www.googleapis.com/auth/gmail.send'
+  'https://www.googleapis.com/auth/gmail.send',
+  // Needed so the extension can pull resume attachments out of the user's
+  // Gmail inbox alongside the Outlook flow.
+  'https://www.googleapis.com/auth/gmail.readonly'
 ].join(' ');
 
 const TOKENS_KEY  = 'google.tokens';
@@ -181,7 +184,11 @@ export async function findNextFreeSlot({
   dayEnd   = '17:00',
   daysAhead = 7,
   timeZone,
-  availabilityWindows = []
+  availabilityWindows = [],
+  // In-run bookings (slots that will be created on the calendar imminently
+  // but haven't been written yet) treated as busy alongside Google's freeBusy.
+  // Same shape as Google busy blocks: [{ start: Date|ISO, end: Date|ISO }].
+  extraBusy = []
 } = {}) {
   const token = await getAccessToken();
   const now   = new Date();
@@ -203,6 +210,11 @@ export async function findNextFreeSlot({
   for (const cid of calendarIds) {
     const cal = fb.calendars?.[cid];
     if (cal?.busy) busy.push(...cal.busy.map((b) => ({ start: new Date(b.start), end: new Date(b.end) })));
+  }
+  // Add in-run bookings to the busy list so we don't double-book a slot
+  // scheduled earlier in this same workflow run.
+  for (const b of extraBusy) {
+    busy.push({ start: new Date(b.start), end: new Date(b.end) });
   }
   busy.sort((a, b) => a.start - b.start);
 
@@ -308,11 +320,17 @@ export async function createMeetEvent({
   timeZone
 }) {
   const token = await getAccessToken();
+  // Strip invalid IANA timezone names ("asia" instead of "Asia/Kolkata", etc.)
+  // before sending to Google -- otherwise it returns "Invalid time zone
+  // definition for start time." and the event is never created. When dropped,
+  // Google falls back to the calendar's own configured timezone.
+  const safeTz = validIanaTimeZone(timeZone);
+  const tzPart = safeTz ? { timeZone: safeTz } : {};
   const body = {
     summary,
     description,
-    start: { dateTime: startIso, timeZone },
-    end:   { dateTime: endIso,   timeZone },
+    start: { dateTime: startIso, ...tzPart },
+    end:   { dateTime: endIso,   ...tzPart },
     attendees,
     conferenceData: {
       createRequest: {
@@ -324,6 +342,20 @@ export async function createMeetEvent({
   };
   const url = `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events?conferenceDataVersion=1&sendUpdates=all`;
   return fetchJson(url, token, { method: 'POST', body: JSON.stringify(body) });
+}
+
+// Returns the input if it's a recognised IANA timezone identifier; otherwise
+// null. Uses Intl.DateTimeFormat as the source of truth -- it throws a
+// RangeError for unknown tz names. Exported so the interviewer-create route
+// can validate at write time too.
+export function validIanaTimeZone(tz) {
+  if (!tz || typeof tz !== 'string') return null;
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: tz });
+    return tz;
+  } catch {
+    return null;
+  }
 }
 
 // --- Gmail send ---------------------------------------------------------
@@ -369,6 +401,168 @@ function rfc2047(s) {
   return `=?UTF-8?B?${b64}?=`;
 }
 
+// --- Gmail read (inbox + attachments) -----------------------------------
+//
+// Mirrors the shape of extension/graph.js so popup.js can treat Outlook
+// and Gmail items the same way.
+//
+// Two-tier filter, same as the Outlook side:
+//   - filename ends in .pdf / .docx  -> attachment candidate
+//   - filename suggests a resume     -> fast-path verdict, skip /classify
+// Inline attachments (signatures, logos) are dropped unless the filename
+// looks like a resume.
+
+function gmailIsPdfOrDocx(name) {
+  if (!name) return false;
+  const lower = name.toLowerCase();
+  return lower.endsWith('.pdf') || lower.endsWith('.docx');
+}
+
+export function gmailIsResumeByFilename(name) {
+  if (!name) return false;
+  const lower = name.toLowerCase();
+  if (lower.includes('resume')) return true;
+  if (lower.includes('curriculum')) return true;
+  // "cv" only as a whole word so "cvs.pdf" / "discover.pdf" don't match.
+  if (/(^|[^a-z0-9])cv([^a-z0-9]|$)/i.test(lower)) return true;
+  return false;
+}
+
+// Decode RFC 4648 §5 (URL-safe base64) with optional missing padding.
+function b64urlDecode(s) {
+  if (!s) return Buffer.alloc(0);
+  const padded = s.replace(/-/g, '+').replace(/_/g, '/');
+  const pad = padded.length % 4 === 0 ? '' : '='.repeat(4 - (padded.length % 4));
+  return Buffer.from(padded + pad, 'base64');
+}
+
+function headerValue(headers, name) {
+  if (!Array.isArray(headers)) return '';
+  const h = headers.find((x) => x?.name?.toLowerCase() === name.toLowerCase());
+  return h?.value || '';
+}
+
+// Walk Gmail's payload tree and collect every part that has a filename and an
+// attachmentId. The Gmail v1 payload is a nested {parts: [...]} structure.
+function collectAttachmentParts(payload, out = []) {
+  if (!payload) return out;
+  const filename = payload.filename || '';
+  const attachmentId = payload.body?.attachmentId;
+  if (filename && attachmentId) {
+    out.push({
+      filename,
+      mimeType: payload.mimeType || 'application/octet-stream',
+      size: Number(payload.body?.size || 0),
+      attachmentId,
+      // Gmail flags inline images via a Content-Disposition: inline header
+      // OR a Content-ID. Treat either as inline so signatures get filtered.
+      isInline:
+        /(^|;)\s*inline\s*(;|$)/i.test(headerValue(payload.headers, 'Content-Disposition')) ||
+        !!headerValue(payload.headers, 'Content-ID')
+    });
+  }
+  if (Array.isArray(payload.parts)) {
+    for (const p of payload.parts) collectAttachmentParts(p, out);
+  }
+  return out;
+}
+
+// Lists recent Gmail messages that have attachments, then for each one pulls
+// the message metadata + attachment list and keeps only PDF/DOCX.
+// Returns the same shape as graph.js's listResumeEmails().
+export async function listGmailResumeEmails({ topMessages = 75 } = {}) {
+  const token = await getAccessToken();
+
+  // 1. Page the inbox for messages with attachments. Gmail's `has:attachment`
+  //    operator is the equivalent of Microsoft's `hasAttachments eq true`.
+  //    `-in:chats` keeps Hangouts cruft out.
+  const listUrl =
+    `https://gmail.googleapis.com/gmail/v1/users/me/messages` +
+    `?maxResults=${Math.max(1, Math.min(100, topMessages))}` +
+    `&q=${encodeURIComponent('has:attachment -in:chats')}`;
+  const list = await fetchJson(listUrl, token);
+  const ids = (list.messages || []).map((m) => m.id);
+  if (!ids.length) return [];
+
+  // 2. Fetch each message's payload tree in parallel (small concurrency cap
+  //    so we don't hit Gmail's per-user quota -- 250 quota units/sec, each
+  //    messages.get costs 5).
+  const out = [];
+  const concurrency = 4;
+  let cursor = 0;
+  async function worker() {
+    while (cursor < ids.length) {
+      const id = ids[cursor++];
+      try {
+        const msg = await fetchJson(
+          `https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}?format=full`,
+          token
+        );
+        const headers = msg.payload?.headers || [];
+        const subject = headerValue(headers, 'Subject') || '(no subject)';
+        const fromRaw = headerValue(headers, 'From') || '(unknown sender)';
+        const dateRaw = headerValue(headers, 'Date') || '';
+        // Internal date is ms-since-epoch and reliable; the Date header can
+        // be malformed. Fall back to Date header if internalDate is missing.
+        const receivedDateTime = msg.internalDate
+          ? new Date(Number(msg.internalDate)).toISOString()
+          : (dateRaw ? new Date(dateRaw).toISOString() : '');
+
+        // "Anil Agarwal <anil@example.com>" -> name + email
+        let fromName = '';
+        let from = fromRaw;
+        const m = fromRaw.match(/^\s*"?([^"<]*?)"?\s*<([^>]+)>\s*$/);
+        if (m) { fromName = m[1].trim(); from = m[2].trim(); }
+
+        const parts = collectAttachmentParts(msg.payload);
+        for (const p of parts) {
+          if (!gmailIsPdfOrDocx(p.filename)) continue;
+          if (p.isInline && !gmailIsResumeByFilename(p.filename)) continue;
+          out.push({
+            source: 'gmail',
+            messageId: msg.id,
+            subject,
+            from,
+            fromName,
+            receivedDateTime,
+            attachmentId: p.attachmentId,
+            filename: p.filename,
+            contentType: p.mimeType,
+            size: p.size,
+            isResumeByFilename: gmailIsResumeByFilename(p.filename)
+          });
+        }
+      } catch (err) {
+        // One bad message shouldn't kill the whole listing.
+        console.warn(`[gmail] failed to get message ${id}:`, err.message);
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: concurrency }, worker));
+
+  out.sort((a, b) => (b.receivedDateTime || '').localeCompare(a.receivedDateTime || ''));
+  return out;
+}
+
+// Downloads a single Gmail attachment by id. Returns the bytes already
+// base64-encoded so the route can pass them straight through to /score.
+export async function downloadGmailAttachment(messageId, attachmentId) {
+  const token = await getAccessToken();
+  const data = await fetchJson(
+    `https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(messageId)}` +
+    `/attachments/${encodeURIComponent(attachmentId)}`,
+    token
+  );
+  // Gmail returns url-safe base64 with no padding. Decode then re-encode as
+  // standard base64 so downstream consumers (Buffer.from(..., 'base64')) work
+  // the same regardless of source.
+  const buf = b64urlDecode(data.data || '');
+  return {
+    contentBase64: buf.toString('base64'),
+    size: Number(data.size || buf.length)
+  };
+}
+
 // --- fetch helper -------------------------------------------------------
 
 async function fetchJson(url, token, opts = {}) {
@@ -383,7 +577,13 @@ async function fetchJson(url, token, opts = {}) {
   const text = await res.text();
   let data; try { data = text ? JSON.parse(text) : {}; } catch { data = { raw: text }; }
   if (!res.ok) {
-    const msg = data?.error?.message || data?.error_description || data?.error || `HTTP ${res.status}`;
+    let msg = data?.error?.message || data?.error_description || data?.error || `HTTP ${res.status}`;
+    // Common case after we add a new scope: the cached refresh token was
+    // issued before the scope existed. Translate Google's terse error into
+    // an actionable hint so the user knows the popup can fix it.
+    if (typeof msg === 'string' && /insufficient authentication scopes/i.test(msg)) {
+      msg = 'Gmail needs to be reconnected to grant the new permissions. Open the extension popup → Connections → Disconnect Gmail → Connect Gmail again.';
+    }
     const err = new Error(`Google API: ${msg}`);
     err.status = res.status;
     err.body = data;

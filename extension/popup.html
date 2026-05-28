@@ -13,13 +13,32 @@
     </div>
     <div class="actions">
       <button id="openDashboardBtn" class="link-btn" title="Open the full dashboard in a new tab">Dashboard ↗</button>
-      <button id="signOutBtn" class="link-btn hidden" title="Sign out">Sign out</button>
+      <button id="manageConnectionsBtn" class="link-btn hidden" title="Add or remove inboxes">Connections</button>
+      <button id="signOutBtn" class="link-btn hidden" title="Sign out of all inboxes">Sign out</button>
     </div>
   </header>
 
   <section id="authPanel" class="panel">
-    <p class="muted">Connect your Outlook account to scan recent emails for resume attachments (PDF / DOCX) and score them with AI.</p>
-    <button id="connectBtn" class="primary">Connect Outlook</button>
+    <p class="muted">Connect an inbox to scan recent emails for resume attachments (PDF / DOCX) and score them with AI. You can connect either or both.</p>
+
+    <div class="connect-grid">
+      <div class="connect-row" data-provider="outlook">
+        <div class="connect-info">
+          <div class="connect-name">Outlook</div>
+          <div class="connect-status muted small" id="outlookStatus">Not connected</div>
+        </div>
+        <button id="connectOutlookBtn" class="secondary">Connect</button>
+      </div>
+      <div class="connect-row" data-provider="gmail">
+        <div class="connect-info">
+          <div class="connect-name">Gmail</div>
+          <div class="connect-status muted small" id="gmailStatus">Not connected</div>
+        </div>
+        <button id="connectGmailBtn" class="secondary">Connect</button>
+      </div>
+    </div>
+
+    <button id="continueBtn" class="primary hidden">Continue</button>
     <p id="authError" class="error hidden"></p>
   </section>
 

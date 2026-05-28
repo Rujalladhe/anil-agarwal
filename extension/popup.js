@@ -1,8 +1,25 @@
 // Popup orchestration: connect, list resumes, score one on click, render.
 
 import { BACKEND_URL } from './config.js';
-import { login, isLoggedIn, clearTokens, getRedirectUri } from './auth.js';
-import { listResumeEmails, downloadAttachment } from './graph.js';
+import { login as outlookLogin, isLoggedIn as outlookLoggedIn, clearTokens as outlookClearTokens, getRedirectUri } from './auth.js';
+import { listResumeEmails as listOutlookEmails, downloadAttachment as downloadOutlookAttachment } from './graph.js';
+import {
+  gmailStatus, isGmailConnected, connectGmail, disconnectGmail,
+  listResumeEmails as listGmailEmails, downloadAttachment as downloadGmailAttachment
+} from './gmail.js';
+
+// Source-aware attachment downloader. Items carry `source: 'outlook' | 'gmail'`
+// so the popup can fetch from whichever inbox they came from without the rest
+// of the code caring.
+async function downloadFor(item) {
+  if (item.source === 'gmail') {
+    return downloadGmailAttachment(item.messageId, item.attachmentId, {
+      filename: item.filename,
+      contentType: item.contentType
+    });
+  }
+  return downloadOutlookAttachment(item.messageId, item.attachmentId);
+}
 
 const $ = (id) => document.getElementById(id);
 
@@ -46,16 +63,69 @@ function fmtDate(iso) {
 }
 
 // -------- Top-level views -------------------------------------------------
+// Tracks which inboxes are currently connected. Updated by refreshConnectionStatus().
+const connected = { outlook: false, gmail: false };
+
+async function refreshConnectionStatus() {
+  const [out, gm] = await Promise.all([
+    outlookLoggedIn().catch(() => false),
+    gmailStatus().catch(() => ({ connected: false }))
+  ]);
+  connected.outlook = !!out;
+  connected.gmail = !!gm.connected;
+
+  // Auth panel rows: show "Connected as ..." vs "Not connected", and flip
+  // the row class so connected ones get the sage tint.
+  const outlookRow = document.querySelector('[data-provider="outlook"]');
+  const gmailRow   = document.querySelector('[data-provider="gmail"]');
+  if (outlookRow) outlookRow.classList.toggle('connected', connected.outlook);
+  if (gmailRow)   gmailRow.classList.toggle('connected',   connected.gmail);
+
+  setText('outlookStatus', connected.outlook ? 'Connected' : 'Not connected');
+  setText('gmailStatus',
+    connected.gmail
+      ? (gm.profile?.email ? `Connected · ${gm.profile.email}` : 'Connected')
+      : (gm.configured === false
+          ? 'Backend missing Google OAuth credentials'
+          : 'Not connected'));
+
+  // Flip the buttons between "Connect" and "Disconnect" based on state.
+  const outBtn = $('connectOutlookBtn');
+  const gmBtn  = $('connectGmailBtn');
+  outBtn.textContent = connected.outlook ? 'Disconnect' : 'Connect';
+  outBtn.classList.toggle('primary', false);
+  outBtn.classList.toggle('secondary', true);
+  gmBtn.textContent  = connected.gmail   ? 'Disconnect' : 'Connect';
+  gmBtn.classList.toggle('primary', false);
+  gmBtn.classList.toggle('secondary', true);
+  // Gmail connect is meaningless when the backend doesn't have client creds.
+  if (gm.configured === false && !connected.gmail) {
+    gmBtn.disabled = true;
+    gmBtn.title = 'Set GOOGLE_CLIENT_ID + GOOGLE_CLIENT_SECRET in backend/.env';
+  } else {
+    gmBtn.disabled = false;
+    gmBtn.title = '';
+  }
+
+  return connected;
+}
+
 async function renderInitial() {
-  if (await isLoggedIn()) {
+  await refreshConnectionStatus();
+  const anyConnected = connected.outlook || connected.gmail;
+
+  if (anyConnected) {
     hide('authPanel');
     show('mainPanel');
     show('signOutBtn');
+    show('manageConnectionsBtn');
     await refreshInbox();
   } else {
     show('authPanel');
     hide('mainPanel');
     hide('signOutBtn');
+    hide('manageConnectionsBtn');
+    hide('continueBtn');
   }
 }
 
@@ -73,7 +143,8 @@ async function saveClassifyCache(cache) {
   await chrome.storage.local.set({ [CLASSIFY_CACHE_KEY]: cache });
 }
 function cacheKey(item) {
-  return `${item.attachmentId}|${item.size}`;
+  // Prefix with source so a Gmail attId can't ever collide with an Outlook one.
+  return `${item.source || 'outlook'}|${item.attachmentId}|${item.size}`;
 }
 
 // -------- Inbox listing ---------------------------------------------------
@@ -84,18 +155,38 @@ async function refreshInbox() {
   setText('statusLine', '');
   $('resumeList').innerHTML = '';
   hide('resultPanel');
-  setLoading(true, 'Scanning Outlook for attachments…');
 
-  let items;
-  try {
-    items = await listResumeEmails({ topMessages: 25 });
-    lastResumes = items;
-  } catch (err) {
-    console.error(err);
-    showMainError(`Could not load inbox: ${err.message}`);
-    setLoading(false);
-    return;
+  // Re-check connection state in case the user just connected/disconnected.
+  await refreshConnectionStatus();
+  const sources = [];
+  if (connected.outlook) sources.push('Outlook');
+  if (connected.gmail)   sources.push('Gmail');
+  setLoading(true, `Scanning ${sources.join(' + ') || 'inboxes'} for attachments…`);
+
+  // Pull both inboxes in parallel; surface each one's error independently so
+  // a Gmail outage doesn't block Outlook results (and vice versa).
+  const tasks = [];
+  if (connected.outlook) tasks.push(listOutlookEmails().then(
+    (r) => ({ ok: true, source: 'outlook', items: r }),
+    (err) => ({ ok: false, source: 'outlook', err })
+  ));
+  if (connected.gmail) tasks.push(listGmailEmails().then(
+    (r) => ({ ok: true, source: 'gmail', items: r }),
+    (err) => ({ ok: false, source: 'gmail', err })
+  ));
+
+  const results = await Promise.all(tasks);
+  const items = [];
+  const errors = [];
+  for (const r of results) {
+    if (r.ok) items.push(...r.items);
+    else      errors.push(`${r.source}: ${r.err.message}`);
   }
+  // Newest first across both inboxes.
+  items.sort((a, b) => (b.receivedDateTime || '').localeCompare(a.receivedDateTime || ''));
+  lastResumes = items;
+
+  if (errors.length) showMainError(errors.join('\n'));
   setLoading(false);
 
   if (!items.length) {
@@ -176,7 +267,10 @@ function buildCard(item) {
   card.innerHTML = `
     <div class="card-top">
       <span class="filename"></span>
-      <span class="badge"></span>
+      <span class="badges">
+        <span class="badge badge-source"></span>
+        <span class="badge"></span>
+      </span>
     </div>
     <div class="subject"></div>
     <div class="meta"></div>
@@ -189,6 +283,13 @@ function buildCard(item) {
   card.querySelector('.subject').textContent = item.subject;
   card.querySelector('.meta').textContent =
     `${item.fromName ? item.fromName + ' · ' : ''}${item.from} · ${fmtDate(item.receivedDateTime)}`;
+
+  // Source badge (Outlook / Gmail) so the user knows which inbox the resume
+  // came from when they've connected both.
+  const src = item.source || 'outlook';
+  const srcEl = card.querySelector('.badge-source');
+  srcEl.textContent = src === 'gmail' ? 'Gmail' : 'Outlook';
+  srcEl.classList.add(src);
 
   const sumBtn = card.querySelector('.btn-summarize');
   sumBtn.addEventListener('click', (e) => {
@@ -223,7 +324,7 @@ async function toggleInboxSummary(item, cardEl, btn) {
   panel.textContent = 'Working…';
 
   try {
-    const att = await downloadAttachment(item.messageId, item.attachmentId);
+    const att = await downloadFor(item);
     const res = await fetch(`${BACKEND_URL}/summarize`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -253,7 +354,9 @@ async function toggleInboxSummary(item, cardEl, btn) {
 }
 
 function applyVerdictToCard(card, item) {
-  const badge = card.querySelector('.badge');
+  // The card has two badges (source + verdict). Pick the one that isn't the
+  // source pill so the "Resume / Checking / Not a resume" label lands right.
+  const badge = card.querySelector('.badge:not(.badge-source)');
   card.classList.remove('pending', 'rejected', 'confirmed');
   if (item._verdict === 'pending') {
     card.classList.add('pending');
@@ -283,7 +386,7 @@ async function classifyPending(pending, cache) {
     while (cursor < pending.length) {
       const it = pending[cursor++];
       try {
-        const att = await downloadAttachment(it.messageId, it.attachmentId);
+        const att = await downloadFor(it);
         const res = await fetch(`${BACKEND_URL}/classify`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -324,7 +427,7 @@ async function scoreOne(item, cardEl) {
 
   setLoading(true, `Downloading ${item.filename}…`);
   try {
-    const att = await downloadAttachment(item.messageId, item.attachmentId);
+    const att = await downloadFor(item);
 
     setLoading(true, 'Sending to backend for AI scoring…');
     const res = await fetch(`${BACKEND_URL}/score`, {
@@ -589,25 +692,85 @@ $('downloadXlsxBtn').addEventListener('click', async () => {
 });
 
 // -------- Event wiring ----------------------------------------------------
-$('connectBtn').addEventListener('click', async () => {
+
+// Outlook connect / disconnect. Same button toggles role based on state.
+$('connectOutlookBtn').addEventListener('click', async () => {
   clearAuthError();
-  $('connectBtn').disabled = true;
+  const btn = $('connectOutlookBtn');
+  btn.disabled = true;
   try {
-    await login();
-    await renderInitial();
+    if (connected.outlook) {
+      await outlookClearTokens();
+      await refreshConnectionStatus();
+      await renderInitial();
+    } else {
+      await outlookLogin();
+      await renderInitial();
+    }
   } catch (err) {
     console.error(err);
-    showAuthError(err.message || 'Login failed.');
+    showAuthError(err.message || 'Outlook connect failed.');
   } finally {
-    $('connectBtn').disabled = false;
+    btn.disabled = false;
   }
 });
 
+// Gmail connect / disconnect. Connect opens a tab to the backend OAuth flow;
+// once the callback succeeds we'll see it on the next refreshConnectionStatus.
+$('connectGmailBtn').addEventListener('click', async () => {
+  clearAuthError();
+  const btn = $('connectGmailBtn');
+  btn.disabled = true;
+  try {
+    if (connected.gmail) {
+      await disconnectGmail();
+      await refreshConnectionStatus();
+      await renderInitial();
+    } else {
+      await connectGmail(); // opens a Google consent tab
+      // The user is now in a Google tab. Poll status for ~90s waiting for
+      // the OAuth callback to flip "connected" -> true, then auto-advance.
+      const deadline = Date.now() + 90_000;
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 2000));
+        await refreshConnectionStatus();
+        if (connected.gmail) {
+          await renderInitial();
+          return;
+        }
+      }
+      // Timed out -- user may have closed the tab without finishing. Leave
+      // them on the auth panel; "Continue" is available if Outlook is wired.
+    }
+  } catch (err) {
+    console.error(err);
+    showAuthError(err.message || 'Gmail connect failed.');
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+// Optional "Continue" button -- shown once at least one inbox is connected so
+// the user can advance without waiting for the Gmail polling loop above.
+$('continueBtn').addEventListener('click', async () => {
+  await renderInitial();
+});
+
+// Bring the user back to the connections picker without signing out.
+$('manageConnectionsBtn').addEventListener('click', async () => {
+  await refreshConnectionStatus();
+  show('authPanel');
+  hide('mainPanel');
+  // If at least one inbox is connected, surface the Continue button so they
+  // can return to the inbox view without reconnecting.
+  if (connected.outlook || connected.gmail) show('continueBtn');
+});
+
 $('refreshBtn').addEventListener('click', async () => {
-  // Kick the background poller too, so any unscored attachments get scored
-  // even if the user hasn't opened the popup since they arrived.
-  try { chrome.runtime.sendMessage({ type: 'auto-score:run-now' }, () => void chrome.runtime.lastError); }
-  catch { /* */ }
+  // Don't kick the background poller here -- it would scan the inbox
+  // concurrently with refreshInbox() below and trip Microsoft's per-mailbox
+  // concurrency limit. The poller runs every minute on its own alarm, so
+  // any unscored attachments will be picked up within ~60s anyway.
   await refreshInbox();
 });
 
@@ -617,7 +780,11 @@ try { chrome.runtime.sendMessage({ type: 'auto-score:clear-badge' }, () => void 
 catch { /* */ }
 
 $('signOutBtn').addEventListener('click', async () => {
-  await clearTokens();
+  // Disconnect every connected inbox. Each call is best-effort.
+  await Promise.allSettled([
+    outlookClearTokens(),
+    connected.gmail ? disconnectGmail() : Promise.resolve()
+  ]);
   await renderInitial();
 });
 

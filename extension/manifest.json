@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Resume Scorer (Outlook -> AI)",
-  "version": "0.1.0",
-  "description": "Logs into Outlook, finds resume attachments, and scores them with an AI via a local backend.",
+  "name": "Resume Scorer (Outlook + Gmail -> AI)",
+  "version": "0.2.0",
+  "description": "Connect Outlook and/or Gmail, find resume attachments across both inboxes, and score them with an AI via a local backend.",
   "permissions": [
     "identity",
     "storage",

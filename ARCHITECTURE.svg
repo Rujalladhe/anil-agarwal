@@ -1,0 +1,644 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1900 1450" font-family="'Segoe UI', Inter, system-ui, sans-serif">
+  <!-- =================== DEFS: gradients, shadows, arrows =================== -->
+  <defs>
+    <!-- subtle drop shadow -->
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="2"/>
+      <feOffset dx="0" dy="2" result="off"/>
+      <feComponentTransfer><feFuncA type="linear" slope="0.18"/></feComponentTransfer>
+      <feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+
+    <!-- gradients per layer -->
+    <linearGradient id="gExt" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#EFF6FF"/><stop offset="100%" stop-color="#DBEAFE"/>
+    </linearGradient>
+    <linearGradient id="gDash" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#EEF2FF"/><stop offset="100%" stop-color="#E0E7FF"/>
+    </linearGradient>
+    <linearGradient id="gApi" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#ECFDF5"/><stop offset="100%" stop-color="#D1FAE5"/>
+    </linearGradient>
+    <linearGradient id="gScore" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#FFFBEB"/><stop offset="100%" stop-color="#FEF3C7"/>
+    </linearGradient>
+    <linearGradient id="gRag" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#FFF7ED"/><stop offset="100%" stop-color="#FFEDD5"/>
+    </linearGradient>
+    <linearGradient id="gAuto" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#FDF2F8"/><stop offset="100%" stop-color="#FCE7F3"/>
+    </linearGradient>
+    <linearGradient id="gStore" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#F1F5F9"/><stop offset="100%" stop-color="#E2E8F0"/>
+    </linearGradient>
+    <linearGradient id="gCloud" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#F5F3FF"/><stop offset="100%" stop-color="#EDE9FE"/>
+    </linearGradient>
+
+    <!-- arrowheads -->
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#334155"/>
+    </marker>
+    <marker id="arrBlue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#2563EB"/>
+    </marker>
+    <marker id="arrGreen" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#059669"/>
+    </marker>
+    <marker id="arrOrange" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#D97706"/>
+    </marker>
+    <marker id="arrPink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#DB2777"/>
+    </marker>
+    <marker id="arrPurple" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#7C3AED"/>
+    </marker>
+    <marker id="arrSlate" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#475569"/>
+    </marker>
+  </defs>
+
+  <!-- =================== BACKGROUND =================== -->
+  <rect width="1900" height="1450" fill="#F8FAFC"/>
+
+  <!-- title -->
+  <text x="950" y="42" text-anchor="middle" font-size="28" font-weight="700" fill="#0F172A">
+    Resume Scorer — High-Level Architecture
+  </text>
+  <text x="950" y="68" text-anchor="middle" font-size="14" fill="#475569">
+    Chrome MV3 extension + local Node/Express backend + SQLite (sqlite-vec) + dashboard SPA + workflow automation
+  </text>
+
+  <!-- =================== LAYER BACKGROUNDS =================== -->
+  <!-- External cloud -->
+  <rect x="40" y="95" width="1820" height="160" rx="14" fill="url(#gCloud)" stroke="#C4B5FD" stroke-width="1.5"/>
+  <text x="60" y="120" font-size="14" font-weight="700" fill="#5B21B6">EXTERNAL SERVICES (cloud)</text>
+
+  <!-- Browser layer -->
+  <rect x="40" y="280" width="900" height="320" rx="14" fill="url(#gExt)" stroke="#93C5FD" stroke-width="1.5"/>
+  <text x="60" y="305" font-size="14" font-weight="700" fill="#1D4ED8">CHROME EXTENSION  (Manifest V3, extension/)</text>
+
+  <!-- Dashboard SPA -->
+  <rect x="960" y="280" width="900" height="320" rx="14" fill="url(#gDash)" stroke="#A5B4FC" stroke-width="1.5"/>
+  <text x="980" y="305" font-size="14" font-weight="700" fill="#4338CA">DASHBOARD SPA  (backend/public/, served at /)</text>
+
+  <!-- Backend Express -->
+  <rect x="40" y="625" width="1820" height="100" rx="14" fill="url(#gApi)" stroke="#6EE7B7" stroke-width="1.5"/>
+  <text x="60" y="650" font-size="14" font-weight="700" fill="#047857">BACKEND HTTP API  (backend/server.js — Express, CORS, SSE)</text>
+
+  <!-- Scoring pipeline -->
+  <rect x="40" y="750" width="560" height="380" rx="14" fill="url(#gScore)" stroke="#FCD34D" stroke-width="1.5"/>
+  <text x="60" y="775" font-size="14" font-weight="700" fill="#B45309">SCORING PIPELINE</text>
+
+  <!-- RAG / Search / Chat -->
+  <rect x="620" y="750" width="640" height="380" rx="14" fill="url(#gRag)" stroke="#FDBA74" stroke-width="1.5"/>
+  <text x="640" y="775" font-size="14" font-weight="700" fill="#C2410C">RAG · SEARCH · CHAT · MATCH</text>
+
+  <!-- Automation -->
+  <rect x="1280" y="750" width="580" height="380" rx="14" fill="url(#gAuto)" stroke="#F9A8D4" stroke-width="1.5"/>
+  <text x="1300" y="775" font-size="14" font-weight="700" fill="#BE185D">AUTOMATION ENGINE</text>
+
+  <!-- Storage -->
+  <rect x="40" y="1155" width="1820" height="250" rx="14" fill="url(#gStore)" stroke="#94A3B8" stroke-width="1.5"/>
+  <text x="60" y="1180" font-size="14" font-weight="700" fill="#334155">PERSISTENCE  (backend/)</text>
+
+  <!-- =================== EXTERNAL BOXES =================== -->
+  <!-- Microsoft Identity -->
+  <g filter="url(#shadow)">
+    <rect x="70" y="145" width="240" height="90" rx="10" fill="#fff" stroke="#7C3AED" stroke-width="1.5"/>
+    <rect x="70" y="145" width="6" height="90" rx="3" fill="#7C3AED"/>
+    <text x="95" y="172" font-size="14" font-weight="700" fill="#5B21B6">Microsoft Identity</text>
+    <text x="95" y="192" font-size="11" fill="#475569">login.microsoftonline.com</text>
+    <text x="95" y="208" font-size="11" fill="#475569">PKCE authorize + token</text>
+    <text x="95" y="224" font-size="11" fill="#475569">tenant = "common"</text>
+  </g>
+  <!-- Microsoft Graph -->
+  <g filter="url(#shadow)">
+    <rect x="330" y="145" width="240" height="90" rx="10" fill="#fff" stroke="#7C3AED" stroke-width="1.5"/>
+    <rect x="330" y="145" width="6" height="90" rx="3" fill="#7C3AED"/>
+    <text x="355" y="172" font-size="14" font-weight="700" fill="#5B21B6">Microsoft Graph</text>
+    <text x="355" y="192" font-size="11" fill="#475569">/me/messages   (Mail.Read)</text>
+    <text x="355" y="208" font-size="11" fill="#475569">/messages/{id}/attachments</text>
+    <text x="355" y="224" font-size="11" fill="#475569">→ base64 contentBytes</text>
+  </g>
+  <!-- AI Providers -->
+  <g filter="url(#shadow)">
+    <rect x="590" y="145" width="270" height="90" rx="10" fill="#fff" stroke="#7C3AED" stroke-width="1.5"/>
+    <rect x="590" y="145" width="6" height="90" rx="3" fill="#7C3AED"/>
+    <text x="615" y="172" font-size="14" font-weight="700" fill="#5B21B6">AI Providers  (LLM)</text>
+    <text x="615" y="192" font-size="11" fill="#475569">groq (default) · anthropic · gemini</text>
+    <text x="615" y="208" font-size="11" fill="#475569">scoring · chat · summarize</text>
+    <text x="615" y="224" font-size="11" fill="#475569">switched by AI_PROVIDER env</text>
+  </g>
+  <!-- Embedding providers -->
+  <g filter="url(#shadow)">
+    <rect x="880" y="145" width="270" height="90" rx="10" fill="#fff" stroke="#7C3AED" stroke-width="1.5"/>
+    <rect x="880" y="145" width="6" height="90" rx="3" fill="#7C3AED"/>
+    <text x="905" y="172" font-size="14" font-weight="700" fill="#5B21B6">Embedding Providers</text>
+    <text x="905" y="192" font-size="11" fill="#475569">google text-embedding-004 (768)</text>
+    <text x="905" y="208" font-size="11" fill="#475569">voyage-3-lite · local MiniLM</text>
+    <text x="905" y="224" font-size="11" fill="#475569">EMBED_PROVIDER env</text>
+  </g>
+  <!-- Google APIs -->
+  <g filter="url(#shadow)">
+    <rect x="1170" y="145" width="290" height="90" rx="10" fill="#fff" stroke="#7C3AED" stroke-width="1.5"/>
+    <rect x="1170" y="145" width="6" height="90" rx="3" fill="#7C3AED"/>
+    <text x="1195" y="172" font-size="14" font-weight="700" fill="#5B21B6">Google APIs (Workspace)</text>
+    <text x="1195" y="192" font-size="11" fill="#475569">OAuth 2.0  ·  Calendar  ·  Meet</text>
+    <text x="1195" y="208" font-size="11" fill="#475569">Gmail send  (raw RFC 822)</text>
+    <text x="1195" y="224" font-size="11" fill="#475569">freeBusy → next free slot</text>
+  </g>
+  <!-- Recruiter/User cloud -->
+  <g filter="url(#shadow)">
+    <rect x="1480" y="145" width="360" height="90" rx="10" fill="#fff" stroke="#7C3AED" stroke-width="1.5"/>
+    <rect x="1480" y="145" width="6" height="90" rx="3" fill="#7C3AED"/>
+    <text x="1505" y="172" font-size="14" font-weight="700" fill="#5B21B6">Recruiter / User</text>
+    <text x="1505" y="192" font-size="11" fill="#475569">opens Chrome side panel  +  opens dashboard tab</text>
+    <text x="1505" y="208" font-size="11" fill="#475569">uploads JD · queries chat · runs workflows</text>
+    <text x="1505" y="224" font-size="11" fill="#475569">downloads Excel export</text>
+  </g>
+
+  <!-- =================== EXTENSION BOXES =================== -->
+  <!-- popup.html / popup.js -->
+  <g filter="url(#shadow)">
+    <rect x="70" y="335" width="260" height="115" rx="10" fill="#fff" stroke="#2563EB" stroke-width="1.5"/>
+    <rect x="70" y="335" width="6" height="115" rx="3" fill="#2563EB"/>
+    <text x="95" y="362" font-size="14" font-weight="700" fill="#1D4ED8">popup UI  (side panel)</text>
+    <text x="95" y="382" font-size="11" fill="#475569">popup.html · popup.css</text>
+    <text x="95" y="398" font-size="11" fill="#475569">popup.js — orchestration</text>
+    <text x="95" y="414" font-size="11" fill="#475569">"Connect Outlook" button</text>
+    <text x="95" y="430" font-size="11" fill="#475569">list mails → score → render</text>
+    <text x="95" y="446" font-size="11" fill="#475569">streaming status updates</text>
+  </g>
+  <!-- background.js -->
+  <g filter="url(#shadow)">
+    <rect x="350" y="335" width="260" height="115" rx="10" fill="#fff" stroke="#2563EB" stroke-width="1.5"/>
+    <rect x="350" y="335" width="6" height="115" rx="3" fill="#2563EB"/>
+    <text x="375" y="362" font-size="14" font-weight="700" fill="#1D4ED8">background.js</text>
+    <text x="375" y="382" font-size="11" fill="#475569">MV3 service worker  (module)</text>
+    <text x="375" y="398" font-size="11" fill="#475569">chrome.alarms — auto-poller</text>
+    <text x="375" y="414" font-size="11" fill="#475569">token refresh scheduler</text>
+    <text x="375" y="430" font-size="11" fill="#475569">opens side panel on action</text>
+    <text x="375" y="446" font-size="11" fill="#475569">side_panel: popup.html</text>
+  </g>
+  <!-- manifest -->
+  <g filter="url(#shadow)">
+    <rect x="630" y="335" width="290" height="115" rx="10" fill="#fff" stroke="#2563EB" stroke-width="1.5"/>
+    <rect x="630" y="335" width="6" height="115" rx="3" fill="#2563EB"/>
+    <text x="655" y="362" font-size="14" font-weight="700" fill="#1D4ED8">manifest.json + icons/</text>
+    <text x="655" y="382" font-size="11" fill="#475569">manifest_version: 3</text>
+    <text x="655" y="398" font-size="11" fill="#475569">perms: identity, storage, alarms, sidePanel</text>
+    <text x="655" y="414" font-size="11" fill="#475569">host: graph.microsoft.com · login.*</text>
+    <text x="655" y="430" font-size="11" fill="#475569">host: http://localhost:8787/*</text>
+    <text x="655" y="446" font-size="11" fill="#475569">icons/icon{16,48,128}.png</text>
+  </g>
+
+  <!-- auth.js -->
+  <g filter="url(#shadow)">
+    <rect x="70" y="470" width="260" height="115" rx="10" fill="#fff" stroke="#2563EB" stroke-width="1.5"/>
+    <rect x="70" y="470" width="6" height="115" rx="3" fill="#2563EB"/>
+    <text x="95" y="497" font-size="14" font-weight="700" fill="#1D4ED8">auth.js  (PKCE OAuth)</text>
+    <text x="95" y="517" font-size="11" fill="#475569">code_verifier + S256 challenge</text>
+    <text x="95" y="533" font-size="11" fill="#475569">launchWebAuthFlow → code</text>
+    <text x="95" y="549" font-size="11" fill="#475569">exchange code → tokens</text>
+    <text x="95" y="565" font-size="11" fill="#475569">grant_type=refresh_token</text>
+    <text x="95" y="581" font-size="11" fill="#475569">chrome.storage.local cache</text>
+  </g>
+  <!-- graph.js -->
+  <g filter="url(#shadow)">
+    <rect x="350" y="470" width="260" height="115" rx="10" fill="#fff" stroke="#2563EB" stroke-width="1.5"/>
+    <rect x="350" y="470" width="6" height="115" rx="3" fill="#2563EB"/>
+    <text x="375" y="497" font-size="14" font-weight="700" fill="#1D4ED8">graph.js</text>
+    <text x="375" y="517" font-size="11" fill="#475569">listMessages (hasAttachments)</text>
+    <text x="375" y="533" font-size="11" fill="#475569">listAttachments(messageId)</text>
+    <text x="375" y="549" font-size="11" fill="#475569">getAttachment → contentBytes</text>
+    <text x="375" y="565" font-size="11" fill="#475569">filter: .pdf / .docx only</text>
+    <text x="375" y="581" font-size="11" fill="#475569">skip inline + signatures</text>
+  </g>
+  <!-- config.js -->
+  <g filter="url(#shadow)">
+    <rect x="630" y="470" width="290" height="115" rx="10" fill="#fff" stroke="#2563EB" stroke-width="1.5"/>
+    <rect x="630" y="470" width="6" height="115" rx="3" fill="#2563EB"/>
+    <text x="655" y="497" font-size="14" font-weight="700" fill="#1D4ED8">config.js</text>
+    <text x="655" y="517" font-size="11" fill="#475569">CLIENT_ID  (Azure app reg)</text>
+    <text x="655" y="533" font-size="11" fill="#475569">TENANT = "common"</text>
+    <text x="655" y="549" font-size="11" fill="#475569">SCOPES = openid profile offline_access</text>
+    <text x="655" y="565" font-size="11" fill="#475569">             User.Read  Mail.Read</text>
+    <text x="655" y="581" font-size="11" fill="#475569">BACKEND_URL = http://localhost:8787</text>
+  </g>
+
+  <!-- =================== DASHBOARD SPA BOXES =================== -->
+  <!-- index.html -->
+  <g filter="url(#shadow)">
+    <rect x="990" y="335" width="270" height="115" rx="10" fill="#fff" stroke="#4F46E5" stroke-width="1.5"/>
+    <rect x="990" y="335" width="6" height="115" rx="3" fill="#4F46E5"/>
+    <text x="1015" y="362" font-size="14" font-weight="700" fill="#4338CA">index.html</text>
+    <text x="1015" y="382" font-size="11" fill="#475569">single-page shell</text>
+    <text x="1015" y="398" font-size="11" fill="#475569">tabs: Pipeline · Search · Chat</text>
+    <text x="1015" y="414" font-size="11" fill="#475569">       · Match · Automation</text>
+    <text x="1015" y="430" font-size="11" fill="#475569">EventSource → /events (SSE)</text>
+    <text x="1015" y="446" font-size="11" fill="#475569">live re-render on resume:scored</text>
+  </g>
+  <!-- dashboard.js / .css -->
+  <g filter="url(#shadow)">
+    <rect x="1280" y="335" width="270" height="115" rx="10" fill="#fff" stroke="#4F46E5" stroke-width="1.5"/>
+    <rect x="1280" y="335" width="6" height="115" rx="3" fill="#4F46E5"/>
+    <text x="1305" y="362" font-size="14" font-weight="700" fill="#4338CA">dashboard.js · dashboard.css</text>
+    <text x="1305" y="382" font-size="11" fill="#475569">resume table  +  rank-by-category</text>
+    <text x="1305" y="398" font-size="11" fill="#475569">recruiter search · chat panel</text>
+    <text x="1305" y="414" font-size="11" fill="#475569">JD match panel  ·  stats tiles</text>
+    <text x="1305" y="430" font-size="11" fill="#475569">delete · summarize · drill-down</text>
+    <text x="1305" y="446" font-size="11" fill="#475569">Excel export download link</text>
+  </g>
+  <!-- automation.js -->
+  <g filter="url(#shadow)">
+    <rect x="1570" y="335" width="270" height="115" rx="10" fill="#fff" stroke="#4F46E5" stroke-width="1.5"/>
+    <rect x="1570" y="335" width="6" height="115" rx="3" fill="#4F46E5"/>
+    <text x="1595" y="362" font-size="14" font-weight="700" fill="#4338CA">automation.js · automation.css</text>
+    <text x="1595" y="382" font-size="11" fill="#475569">visual workflow builder</text>
+    <text x="1595" y="398" font-size="11" fill="#475569">nodes: trigger · filter · branch</text>
+    <text x="1595" y="414" font-size="11" fill="#475569">         · delay · email · calendar</text>
+    <text x="1595" y="430" font-size="11" fill="#475569">interviewers · OA templates</text>
+    <text x="1595" y="446" font-size="11" fill="#475569">Google connect button</text>
+  </g>
+  <!-- Routes summary card -->
+  <g filter="url(#shadow)">
+    <rect x="990" y="470" width="850" height="115" rx="10" fill="#fff" stroke="#4F46E5" stroke-width="1.5"/>
+    <rect x="990" y="470" width="6" height="115" rx="3" fill="#4F46E5"/>
+    <text x="1015" y="497" font-size="14" font-weight="700" fill="#4338CA">SPA → Backend REST + SSE</text>
+    <text x="1015" y="517" font-size="11" fill="#475569">GET  /resumes · /resumes/by-category · /resumes/search · /resumes/:id · /resumes/:id/file · /resumes/export.xlsx</text>
+    <text x="1015" y="533" font-size="11" fill="#475569">POST /score · /score-text · /classify · /summarize · /match · /parse-query · /chat · /chat/stream (SSE)</text>
+    <text x="1015" y="549" font-size="11" fill="#475569">GET  /threads · /threads/:id/messages   |   DELETE /resumes/:id · /threads/:id</text>
+    <text x="1015" y="565" font-size="11" fill="#475569">/automation/workflows[/:id][/run]  ·  /automation/runs  ·  /automation/interviewers  ·  /automation/templates</text>
+    <text x="1015" y="581" font-size="11" fill="#475569">/automation/google/{status,auth,callback,disconnect}   |   GET /events (Server-Sent Events)</text>
+  </g>
+
+  <!-- =================== BACKEND SERVER BAR =================== -->
+  <g filter="url(#shadow)">
+    <rect x="70" y="665" width="1760" height="50" rx="10" fill="#fff" stroke="#059669" stroke-width="1.5"/>
+    <rect x="70" y="665" width="6" height="50" rx="3" fill="#059669"/>
+    <text x="95" y="688" font-size="13" font-weight="700" fill="#047857">server.js</text>
+    <text x="95" y="704" font-size="11" fill="#475569">routes all REST + SSE · static-serves /public · in-process EventEmitter broadcasts resume:scored frames · CORS open for chrome-extension://</text>
+  </g>
+
+  <!-- =================== SCORING PIPELINE BOXES =================== -->
+  <!-- extract.js -->
+  <g filter="url(#shadow)">
+    <rect x="60" y="795" width="250" height="100" rx="10" fill="#fff" stroke="#D97706" stroke-width="1.5"/>
+    <rect x="60" y="795" width="6" height="100" rx="3" fill="#D97706"/>
+    <text x="85" y="822" font-size="14" font-weight="700" fill="#B45309">extract.js</text>
+    <text x="85" y="842" font-size="11" fill="#475569">PDF → pdf-parse</text>
+    <text x="85" y="858" font-size="11" fill="#475569">DOCX → mammoth</text>
+    <text x="85" y="874" font-size="11" fill="#475569">picks parser by ext + ctype</text>
+    <text x="85" y="890" font-size="11" fill="#475569">returns plain text</text>
+  </g>
+  <!-- classify.js -->
+  <g filter="url(#shadow)">
+    <rect x="330" y="795" width="250" height="100" rx="10" fill="#fff" stroke="#D97706" stroke-width="1.5"/>
+    <rect x="330" y="795" width="6" height="100" rx="3" fill="#D97706"/>
+    <text x="355" y="822" font-size="14" font-weight="700" fill="#B45309">classify.js</text>
+    <text x="355" y="842" font-size="11" fill="#475569">cheap heuristic — no AI</text>
+    <text x="355" y="858" font-size="11" fill="#475569">section headers + contact</text>
+    <text x="355" y="874" font-size="11" fill="#475569">signals → isResume bool</text>
+    <text x="355" y="890" font-size="11" fill="#475569">rejects invoices/brochures</text>
+  </g>
+  <!-- ai.js -->
+  <g filter="url(#shadow)">
+    <rect x="60" y="915" width="520" height="100" rx="10" fill="#fff" stroke="#D97706" stroke-width="1.5"/>
+    <rect x="60" y="915" width="6" height="100" rx="3" fill="#D97706"/>
+    <text x="85" y="942" font-size="14" font-weight="700" fill="#B45309">ai.js  —  provider-agnostic scoring</text>
+    <text x="85" y="962" font-size="11" fill="#475569">groq · anthropic · gemini  (switched by AI_PROVIDER)</text>
+    <text x="85" y="978" font-size="11" fill="#475569">strict-JSON prompt: { score, breakdown, summary, strengths, concerns, recommendations, candidate, category, roleTitle }</text>
+    <text x="85" y="994" font-size="11" fill="#475569">defensive parse — strips ``` fences, finds first {…} block</text>
+  </g>
+  <!-- rescore / reindex -->
+  <g filter="url(#shadow)">
+    <rect x="60" y="1035" width="250" height="80" rx="10" fill="#fff" stroke="#D97706" stroke-width="1.5"/>
+    <rect x="60" y="1035" width="6" height="80" rx="3" fill="#D97706"/>
+    <text x="85" y="1062" font-size="13" font-weight="700" fill="#B45309">rescore.js (CLI)</text>
+    <text x="85" y="1082" font-size="11" fill="#475569">re-score stored resumes</text>
+    <text x="85" y="1098" font-size="11" fill="#475569">after prompt / model change</text>
+  </g>
+  <g filter="url(#shadow)">
+    <rect x="330" y="1035" width="250" height="80" rx="10" fill="#fff" stroke="#D97706" stroke-width="1.5"/>
+    <rect x="330" y="1035" width="6" height="80" rx="3" fill="#D97706"/>
+    <text x="355" y="1062" font-size="13" font-weight="700" fill="#B45309">reindex.js (CLI)</text>
+    <text x="355" y="1082" font-size="11" fill="#475569">rebuild chunk_vectors</text>
+    <text x="355" y="1098" font-size="11" fill="#475569">after embed-provider switch</text>
+  </g>
+
+  <!-- =================== RAG / SEARCH / CHAT BOXES =================== -->
+  <!-- chunker.js -->
+  <g filter="url(#shadow)">
+    <rect x="640" y="795" width="200" height="95" rx="10" fill="#fff" stroke="#EA580C" stroke-width="1.5"/>
+    <rect x="640" y="795" width="6" height="95" rx="3" fill="#EA580C"/>
+    <text x="665" y="822" font-size="13" font-weight="700" fill="#C2410C">chunker.js</text>
+    <text x="665" y="842" font-size="11" fill="#475569">split resume text</text>
+    <text x="665" y="858" font-size="11" fill="#475569">~250 words / chunk</text>
+    <text x="665" y="874" font-size="11" fill="#475569">~40-word overlap</text>
+  </g>
+  <!-- embeddings.js -->
+  <g filter="url(#shadow)">
+    <rect x="860" y="795" width="200" height="95" rx="10" fill="#fff" stroke="#EA580C" stroke-width="1.5"/>
+    <rect x="860" y="795" width="6" height="95" rx="3" fill="#EA580C"/>
+    <text x="885" y="822" font-size="13" font-weight="700" fill="#C2410C">embeddings.js</text>
+    <text x="885" y="842" font-size="11" fill="#475569">embedTexts · embedQuery</text>
+    <text x="885" y="858" font-size="11" fill="#475569">google · voyage · local</text>
+    <text x="885" y="874" font-size="11" fill="#475569">dim must match db.js</text>
+  </g>
+  <!-- rag.js -->
+  <g filter="url(#shadow)">
+    <rect x="1080" y="795" width="170" height="95" rx="10" fill="#fff" stroke="#EA580C" stroke-width="1.5"/>
+    <rect x="1080" y="795" width="6" height="95" rx="3" fill="#EA580C"/>
+    <text x="1105" y="822" font-size="13" font-weight="700" fill="#C2410C">rag.js</text>
+    <text x="1105" y="842" font-size="11" fill="#475569">indexResume(id, text)</text>
+    <text x="1105" y="858" font-size="11" fill="#475569">retrieve · retrieveHybrid</text>
+    <text x="1105" y="874" font-size="11" fill="#475569">RRF: vec + BM25 FTS5</text>
+  </g>
+  <!-- chat.js -->
+  <g filter="url(#shadow)">
+    <rect x="640" y="910" width="290" height="100" rx="10" fill="#fff" stroke="#EA580C" stroke-width="1.5"/>
+    <rect x="640" y="910" width="6" height="100" rx="3" fill="#EA580C"/>
+    <text x="665" y="937" font-size="14" font-weight="700" fill="#C2410C">chat.js</text>
+    <text x="665" y="957" font-size="11" fill="#475569">per-resume  OR  cross-resume mode</text>
+    <text x="665" y="973" font-size="11" fill="#475569">retrieves top-K chunks + summaries</text>
+    <text x="665" y="989" font-size="11" fill="#475569">chat() · chatStream() · summarizeText()</text>
+    <text x="665" y="1005" font-size="11" fill="#475569">persists messages in chat_threads</text>
+  </g>
+  <!-- match.js -->
+  <g filter="url(#shadow)">
+    <rect x="950" y="910" width="290" height="100" rx="10" fill="#fff" stroke="#EA580C" stroke-width="1.5"/>
+    <rect x="950" y="910" width="6" height="100" rx="3" fill="#EA580C"/>
+    <text x="975" y="937" font-size="14" font-weight="700" fill="#C2410C">match.js</text>
+    <text x="975" y="957" font-size="11" fill="#475569">JD → ranked candidates</text>
+    <text x="975" y="973" font-size="11" fill="#475569">embed JD · search across all chunks</text>
+    <text x="975" y="989" font-size="11" fill="#475569">aggregate per resume → matchScore</text>
+    <text x="975" y="1005" font-size="11" fill="#475569">1 LLM call → per-candidate reasons</text>
+  </g>
+  <!-- search.js -->
+  <g filter="url(#shadow)">
+    <rect x="640" y="1030" width="600" height="90" rx="10" fill="#fff" stroke="#EA580C" stroke-width="1.5"/>
+    <rect x="640" y="1030" width="6" height="90" rx="3" fill="#EA580C"/>
+    <text x="665" y="1057" font-size="14" font-weight="700" fill="#C2410C">search.js</text>
+    <text x="665" y="1077" font-size="11" fill="#475569">searchResumes(filters) — SQL on resumes table  ·  category · skills · years · location · score</text>
+    <text x="665" y="1093" font-size="11" fill="#475569">parseRecruiterQuery(text) — regex NL parser ("React devs with 5+ yrs") → filters object — no AI cost</text>
+    <text x="665" y="1109" font-size="11" fill="#475569">getStats() — dashboard tiles</text>
+  </g>
+
+  <!-- =================== AUTOMATION BOXES =================== -->
+  <!-- automation.js -->
+  <g filter="url(#shadow)">
+    <rect x="1300" y="795" width="270" height="115" rx="10" fill="#fff" stroke="#DB2777" stroke-width="1.5"/>
+    <rect x="1300" y="795" width="6" height="115" rx="3" fill="#DB2777"/>
+    <text x="1325" y="822" font-size="14" font-weight="700" fill="#BE185D">automation.js  (engine)</text>
+    <text x="1325" y="842" font-size="11" fill="#475569">runWorkflow(id, {mode, ...})</text>
+    <text x="1325" y="858" font-size="11" fill="#475569">topological node walk</text>
+    <text x="1325" y="874" font-size="11" fill="#475569">trigger → filter/branch/delay</text>
+    <text x="1325" y="890" font-size="11" fill="#475569">  → action (email/calendar/log)</text>
+    <text x="1325" y="906" font-size="11" fill="#475569">live  ·  dry-run modes</text>
+  </g>
+  <!-- automationDb.js -->
+  <g filter="url(#shadow)">
+    <rect x="1590" y="795" width="250" height="115" rx="10" fill="#fff" stroke="#DB2777" stroke-width="1.5"/>
+    <rect x="1590" y="795" width="6" height="115" rx="3" fill="#DB2777"/>
+    <text x="1615" y="822" font-size="14" font-weight="700" fill="#BE185D">automationDb.js</text>
+    <text x="1615" y="842" font-size="11" fill="#475569">workflows CRUD · runs · actions</text>
+    <text x="1615" y="858" font-size="11" fill="#475569">interviewers + availability</text>
+    <text x="1615" y="874" font-size="11" fill="#475569">OA templates  (Mustache-ish)</text>
+    <text x="1615" y="890" font-size="11" fill="#475569">kvGet/Set/Del  (token cache)</text>
+    <text x="1615" y="906" font-size="11" fill="#475569">ensureAutomationSchema · seed</text>
+  </g>
+  <!-- google.js -->
+  <g filter="url(#shadow)">
+    <rect x="1300" y="930" width="540" height="115" rx="10" fill="#fff" stroke="#DB2777" stroke-width="1.5"/>
+    <rect x="1300" y="930" width="6" height="115" rx="3" fill="#DB2777"/>
+    <text x="1325" y="957" font-size="14" font-weight="700" fill="#BE185D">google.js  (OAuth + Calendar + Gmail)</text>
+    <text x="1325" y="977" font-size="11" fill="#475569">getAuthUrl · exchangeCode · disconnectGoogle  ·  getAccessToken (lazy refresh, 60s skew)</text>
+    <text x="1325" y="993" font-size="11" fill="#475569">findNextFreeSlot — freeBusy across interviewer calendars</text>
+    <text x="1325" y="1009" font-size="11" fill="#475569">createMeetEvent — Calendar Event + conferenceData (Meet link)</text>
+    <text x="1325" y="1025" font-size="11" fill="#475569">sendGmail — raw RFC 822 base64url  ·  validIanaTimeZone() guard</text>
+    <text x="1325" y="1041" font-size="11" fill="#475569">tokens persisted via automation_kv  ('google.tokens')</text>
+  </g>
+  <!-- test files -->
+  <g filter="url(#shadow)">
+    <rect x="1300" y="1060" width="540" height="60" rx="10" fill="#fff" stroke="#DB2777" stroke-width="1.5" stroke-dasharray="4 3"/>
+    <rect x="1300" y="1060" width="6" height="60" rx="3" fill="#DB2777"/>
+    <text x="1325" y="1083" font-size="12" font-weight="700" fill="#BE185D">test-automation.js  ·  test-google.js   (dev CLIs)</text>
+    <text x="1325" y="1101" font-size="11" fill="#475569">smoke-test workflow runner and Google integration without hitting the UI</text>
+  </g>
+
+  <!-- =================== PERSISTENCE BOXES =================== -->
+  <!-- db.js -->
+  <g filter="url(#shadow)">
+    <rect x="70" y="1205" width="300" height="180" rx="10" fill="#fff" stroke="#475569" stroke-width="1.5"/>
+    <rect x="70" y="1205" width="6" height="180" rx="3" fill="#475569"/>
+    <text x="95" y="1232" font-size="14" font-weight="700" fill="#334155">db.js  (SQLite + sqlite-vec)</text>
+    <text x="95" y="1252" font-size="11" fill="#475569">better-sqlite3 connection</text>
+    <text x="95" y="1268" font-size="11" fill="#475569">loads sqlite-vec extension</text>
+    <text x="95" y="1284" font-size="11" fill="#475569">EMBED_DIM fixed at create</text>
+    <text x="95" y="1300" font-size="11" fill="#475569">insertResume · listResumes</text>
+    <text x="95" y="1316" font-size="11" fill="#475569">listResumesByCategory</text>
+    <text x="95" y="1332" font-size="11" fill="#475569">searchChunks · searchChunksBM25</text>
+    <text x="95" y="1348" font-size="11" fill="#475569">thread/message helpers</text>
+    <text x="95" y="1372" font-size="11" font-style="italic" fill="#64748B">backend/data.db (+ -shm, -wal)</text>
+  </g>
+
+  <!-- core tables -->
+  <g filter="url(#shadow)">
+    <rect x="390" y="1205" width="280" height="180" rx="10" fill="#fff" stroke="#475569" stroke-width="1.5"/>
+    <rect x="390" y="1205" width="6" height="180" rx="3" fill="#475569"/>
+    <text x="415" y="1232" font-size="14" font-weight="700" fill="#334155">Core tables</text>
+    <text x="415" y="1252" font-size="11" fill="#475569">resumes</text>
+    <text x="415" y="1268" font-size="11" fill="#475569">  id, email_id, attachment_id, file_path</text>
+    <text x="415" y="1284" font-size="11" fill="#475569">  candidate fields, raw_text, review_json</text>
+    <text x="415" y="1300" font-size="11" fill="#475569">  score, category, role_title</text>
+    <text x="415" y="1320" font-size="11" fill="#475569">chunks  (FTS5 BM25 index)</text>
+    <text x="415" y="1340" font-size="11" fill="#475569">chunk_vectors  (vec0 virtual table)</text>
+    <text x="415" y="1360" font-size="11" fill="#475569">chat_threads  ·  chat_messages</text>
+  </g>
+
+  <!-- automation tables -->
+  <g filter="url(#shadow)">
+    <rect x="690" y="1205" width="280" height="180" rx="10" fill="#fff" stroke="#475569" stroke-width="1.5"/>
+    <rect x="690" y="1205" width="6" height="180" rx="3" fill="#475569"/>
+    <text x="715" y="1232" font-size="14" font-weight="700" fill="#334155">Automation tables</text>
+    <text x="715" y="1252" font-size="11" fill="#475569">workflows  (graph_json)</text>
+    <text x="715" y="1268" font-size="11" fill="#475569">workflow_runs</text>
+    <text x="715" y="1284" font-size="11" fill="#475569">workflow_actions  (per-candidate)</text>
+    <text x="715" y="1300" font-size="11" fill="#475569">interviewers  +  availability windows</text>
+    <text x="715" y="1316" font-size="11" fill="#475569">oa_templates  (name, subject, body, link)</text>
+    <text x="715" y="1340" font-size="11" fill="#475569">automation_kv</text>
+    <text x="715" y="1356" font-size="11" fill="#475569">  google.tokens · provider settings</text>
+  </g>
+
+  <!-- uploads -->
+  <g filter="url(#shadow)">
+    <rect x="990" y="1205" width="280" height="180" rx="10" fill="#fff" stroke="#475569" stroke-width="1.5"/>
+    <rect x="990" y="1205" width="6" height="180" rx="3" fill="#475569"/>
+    <text x="1015" y="1232" font-size="14" font-weight="700" fill="#334155">uploads/  (file blobs)</text>
+    <text x="1015" y="1252" font-size="11" fill="#475569">original .pdf / .docx bytes</text>
+    <text x="1015" y="1268" font-size="11" fill="#475569">saved via saveAttachment()</text>
+    <text x="1015" y="1284" font-size="11" fill="#475569">served back at /resumes/:id/file</text>
+    <text x="1015" y="1300" font-size="11" fill="#475569">linked from Excel export</text>
+    <text x="1015" y="1320" font-size="11" fill="#475569">path stored in resumes.file_path</text>
+    <text x="1015" y="1340" font-size="11" fill="#475569">name sanitized + timestamped</text>
+  </g>
+
+  <!-- env / config -->
+  <g filter="url(#shadow)">
+    <rect x="1290" y="1205" width="280" height="180" rx="10" fill="#fff" stroke="#475569" stroke-width="1.5"/>
+    <rect x="1290" y="1205" width="6" height="180" rx="3" fill="#475569"/>
+    <text x="1315" y="1232" font-size="14" font-weight="700" fill="#334155">.env  (git-ignored)</text>
+    <text x="1315" y="1252" font-size="11" fill="#475569">AI_PROVIDER · MODEL</text>
+    <text x="1315" y="1268" font-size="11" fill="#475569">GROQ_API_KEY · ANTHROPIC_API_KEY</text>
+    <text x="1315" y="1284" font-size="11" fill="#475569">GEMINI_API_KEY</text>
+    <text x="1315" y="1300" font-size="11" fill="#475569">EMBED_PROVIDER · EMBED_DIM</text>
+    <text x="1315" y="1316" font-size="11" fill="#475569">GOOGLE_CLIENT_ID / SECRET</text>
+    <text x="1315" y="1332" font-size="11" fill="#475569">GOOGLE_REDIRECT_URI · PORT</text>
+    <text x="1315" y="1356" font-size="11" font-style="italic" fill="#64748B">never shipped to extension</text>
+  </g>
+
+  <!-- legend -->
+  <g filter="url(#shadow)">
+    <rect x="1590" y="1205" width="270" height="180" rx="10" fill="#fff" stroke="#475569" stroke-width="1.5"/>
+    <rect x="1590" y="1205" width="6" height="180" rx="3" fill="#475569"/>
+    <text x="1615" y="1232" font-size="14" font-weight="700" fill="#334155">Legend</text>
+    <rect x="1615" y="1245" width="14" height="14" rx="3" fill="url(#gExt)" stroke="#2563EB"/><text x="1638" y="1257" font-size="11" fill="#334155">Chrome extension (MV3)</text>
+    <rect x="1615" y="1265" width="14" height="14" rx="3" fill="url(#gDash)" stroke="#4F46E5"/><text x="1638" y="1277" font-size="11" fill="#334155">Dashboard SPA</text>
+    <rect x="1615" y="1285" width="14" height="14" rx="3" fill="url(#gApi)" stroke="#059669"/><text x="1638" y="1297" font-size="11" fill="#334155">HTTP API (Express)</text>
+    <rect x="1615" y="1305" width="14" height="14" rx="3" fill="url(#gScore)" stroke="#D97706"/><text x="1638" y="1317" font-size="11" fill="#334155">Scoring pipeline</text>
+    <rect x="1615" y="1325" width="14" height="14" rx="3" fill="url(#gRag)" stroke="#EA580C"/><text x="1638" y="1337" font-size="11" fill="#334155">RAG · search · chat</text>
+    <rect x="1615" y="1345" width="14" height="14" rx="3" fill="url(#gAuto)" stroke="#DB2777"/><text x="1638" y="1357" font-size="11" fill="#334155">Automation engine</text>
+    <rect x="1615" y="1365" width="14" height="14" rx="3" fill="url(#gStore)" stroke="#475569"/><text x="1638" y="1377" font-size="11" fill="#334155">Persistence</text>
+  </g>
+
+  <!-- =================== ARROWS =================== -->
+  <!-- Recruiter -> Extension popup -->
+  <path d="M 1660,235 C 1660,290 350,290 200,335" stroke="#7C3AED" stroke-width="1.6" fill="none" marker-end="url(#arrPurple)" stroke-dasharray="5 4"/>
+  <text x="900" y="276" font-size="10" fill="#7C3AED">opens side panel</text>
+
+  <!-- Recruiter -> Dashboard SPA -->
+  <path d="M 1660,235 C 1660,260 1500,265 1430,335" stroke="#7C3AED" stroke-width="1.6" fill="none" marker-end="url(#arrPurple)" stroke-dasharray="5 4"/>
+  <text x="1490" y="305" font-size="10" fill="#7C3AED">opens /</text>
+
+  <!-- Extension auth -> Microsoft Identity -->
+  <path d="M 200,470 C 200,300 200,260 190,235" stroke="#2563EB" stroke-width="1.8" fill="none" marker-end="url(#arrBlue)"/>
+  <text x="80" y="270" font-size="10" fill="#2563EB">PKCE  authorize + token</text>
+
+  <!-- Extension graph -> Microsoft Graph -->
+  <path d="M 480,470 C 480,300 470,260 460,235" stroke="#2563EB" stroke-width="1.8" fill="none" marker-end="url(#arrBlue)"/>
+  <text x="490" y="270" font-size="10" fill="#2563EB">Mail + attachments</text>
+
+  <!-- popup -> background (sw) -->
+  <path d="M 330,400 L 350,400" stroke="#2563EB" stroke-width="1.5" fill="none" marker-end="url(#arrBlue)"/>
+
+  <!-- popup -> auth.js -->
+  <path d="M 200,450 L 200,470" stroke="#2563EB" stroke-width="1.5" fill="none" marker-end="url(#arrBlue)"/>
+
+  <!-- popup -> graph.js -->
+  <path d="M 280,450 L 420,470" stroke="#2563EB" stroke-width="1.5" fill="none" marker-end="url(#arrBlue)"/>
+
+  <!-- auth -> graph (token) -->
+  <path d="M 330,528 L 350,528" stroke="#2563EB" stroke-width="1.3" fill="none" marker-end="url(#arrBlue)" stroke-dasharray="3 3"/>
+  <text x="305" y="520" font-size="9" fill="#2563EB">token</text>
+
+  <!-- Extension popup -> backend (score) -->
+  <path d="M 330,425 C 600,425 600,690 800,690" stroke="#2563EB" stroke-width="1.8" fill="none" marker-end="url(#arrBlue)"/>
+  <text x="540" y="438" font-size="10" fill="#2563EB">POST /score, /classify   (base64 attachment)</text>
+
+  <!-- Dashboard -> backend (REST + SSE) -->
+  <path d="M 1430,585 C 1430,610 1100,615 950,665" stroke="#4F46E5" stroke-width="1.8" fill="none" marker-end="url(#arrBlue)"/>
+  <text x="1100" y="618" font-size="10" fill="#4338CA">REST + SSE  (/events stream)</text>
+
+  <!-- backend -> dashboard SSE (broadcast) -->
+  <path d="M 1100,665 C 1100,640 1450,615 1450,585" stroke="#059669" stroke-width="1.5" fill="none" marker-end="url(#arrGreen)" stroke-dasharray="6 4"/>
+  <text x="1180" y="640" font-size="10" fill="#047857">resume:scored frames</text>
+
+  <!-- Server.js -> Scoring pipeline -->
+  <path d="M 300,715 L 200,795" stroke="#059669" stroke-width="1.6" fill="none" marker-end="url(#arrGreen)"/>
+  <text x="180" y="755" font-size="10" fill="#047857">/score · /classify</text>
+
+  <!-- Server.js -> RAG -->
+  <path d="M 900,715 L 900,790" stroke="#059669" stroke-width="1.6" fill="none" marker-end="url(#arrGreen)"/>
+  <text x="780" y="745" font-size="10" fill="#047857">/chat · /match · /summarize · /resumes/search</text>
+
+  <!-- Server.js -> Automation -->
+  <path d="M 1500,715 L 1500,790" stroke="#059669" stroke-width="1.6" fill="none" marker-end="url(#arrGreen)"/>
+  <text x="1330" y="745" font-size="10" fill="#047857">/automation/* · /automation/google/*</text>
+
+  <!-- inside Scoring pipeline: extract -> classify -->
+  <path d="M 310,845 L 330,845" stroke="#D97706" stroke-width="1.5" fill="none" marker-end="url(#arrOrange)"/>
+  <!-- extract -> ai -->
+  <path d="M 180,895 L 180,915" stroke="#D97706" stroke-width="1.5" fill="none" marker-end="url(#arrOrange)"/>
+  <text x="100" y="912" font-size="9" fill="#B45309">text</text>
+
+  <!-- ai -> external AI providers -->
+  <path d="M 320,915 C 320,500 720,500 720,235" stroke="#D97706" stroke-width="1.6" fill="none" marker-end="url(#arrOrange)"/>
+  <text x="540" y="495" font-size="10" fill="#B45309">LLM call  (groq · anthropic · gemini)</text>
+
+  <!-- inside RAG: chunker -> embeddings -> rag -->
+  <path d="M 840,842 L 860,842" stroke="#EA580C" stroke-width="1.5" fill="none" marker-end="url(#arrOrange)"/>
+  <path d="M 1060,842 L 1080,842" stroke="#EA580C" stroke-width="1.5" fill="none" marker-end="url(#arrOrange)"/>
+
+  <!-- rag -> chat -->
+  <path d="M 1080,870 C 950,890 850,895 850,910" stroke="#EA580C" stroke-width="1.5" fill="none" marker-end="url(#arrOrange)"/>
+  <!-- rag -> match -->
+  <path d="M 1165,890 L 1100,910" stroke="#EA580C" stroke-width="1.5" fill="none" marker-end="url(#arrOrange)"/>
+
+  <!-- embeddings -> Embedding providers -->
+  <path d="M 960,795 C 960,500 1010,500 1010,235" stroke="#EA580C" stroke-width="1.5" fill="none" marker-end="url(#arrOrange)"/>
+  <text x="965" y="500" font-size="10" fill="#C2410C">embed</text>
+
+  <!-- chat -> AI providers -->
+  <path d="M 780,910 C 780,500 740,500 740,235" stroke="#EA580C" stroke-width="1.5" fill="none" marker-end="url(#arrOrange)" stroke-dasharray="5 4"/>
+  <text x="745" y="450" font-size="10" fill="#C2410C">chat LLM</text>
+
+  <!-- match -> AI providers -->
+  <path d="M 1095,910 C 1095,500 760,500 760,235" stroke="#EA580C" stroke-width="1.3" fill="none" marker-end="url(#arrOrange)" stroke-dasharray="5 4"/>
+  <text x="1100" y="500" font-size="10" fill="#C2410C">reason LLM (1×)</text>
+
+  <!-- inside Automation: engine -> automationDb -->
+  <path d="M 1570,855 L 1590,855" stroke="#DB2777" stroke-width="1.5" fill="none" marker-end="url(#arrPink)"/>
+  <!-- engine -> google -->
+  <path d="M 1430,910 L 1430,930" stroke="#DB2777" stroke-width="1.5" fill="none" marker-end="url(#arrPink)"/>
+  <!-- automationDb -> google (token kv) -->
+  <path d="M 1700,910 L 1700,930" stroke="#DB2777" stroke-width="1.3" fill="none" marker-end="url(#arrPink)" stroke-dasharray="3 3"/>
+  <text x="1705" y="925" font-size="9" fill="#BE185D">kv tokens</text>
+
+  <!-- google -> Google APIs -->
+  <path d="M 1500,930 C 1500,500 1310,500 1310,235" stroke="#DB2777" stroke-width="1.6" fill="none" marker-end="url(#arrPink)"/>
+  <text x="1310" y="500" font-size="10" fill="#BE185D">Calendar · Meet · Gmail</text>
+
+  <!-- Storage arrows -->
+  <!-- ai/rag/chat/match/search ↓ db.js -->
+  <path d="M 300,1015 L 220,1205" stroke="#475569" stroke-width="1.5" fill="none" marker-end="url(#arrSlate)"/>
+  <path d="M 800,1115 L 250,1205" stroke="#475569" stroke-width="1.5" fill="none" marker-end="url(#arrSlate)"/>
+  <text x="350" y="1175" font-size="10" fill="#475569">read / write resumes · chunks · threads</text>
+
+  <!-- automationDb -> db.js (shares conn) -->
+  <path d="M 1700,910 C 1700,1170 320,1170 220,1205" stroke="#475569" stroke-width="1.2" fill="none" marker-end="url(#arrSlate)" stroke-dasharray="4 4"/>
+  <text x="1300" y="1162" font-size="10" fill="#475569">shares better-sqlite3 connection</text>
+
+  <!-- db.js -> tables -->
+  <path d="M 370,1295 L 390,1295" stroke="#475569" stroke-width="1.4" fill="none" marker-end="url(#arrSlate)"/>
+  <path d="M 370,1320 L 690,1320" stroke="#475569" stroke-width="1.4" fill="none" marker-end="url(#arrSlate)"/>
+
+  <!-- server.js -> uploads -->
+  <path d="M 1100,715 C 1100,1160 1130,1160 1130,1205" stroke="#475569" stroke-width="1.4" fill="none" marker-end="url(#arrSlate)" stroke-dasharray="4 4"/>
+  <text x="1110" y="1165" font-size="10" fill="#475569">saveAttachment()</text>
+
+  <!-- backend reads .env -->
+  <path d="M 1500,715 C 1500,1160 1430,1160 1430,1205" stroke="#475569" stroke-width="1.4" fill="none" marker-end="url(#arrSlate)" stroke-dasharray="4 4"/>
+  <text x="1440" y="1170" font-size="10" fill="#475569">dotenv at boot</text>
+
+  <!-- Google callback redirect note -->
+  <path d="M 1610,235 C 1610,650 1500,660 1500,665" stroke="#7C3AED" stroke-width="1.2" fill="none" marker-end="url(#arrPurple)" stroke-dasharray="3 3"/>
+  <text x="1620" y="640" font-size="10" fill="#7C3AED">/automation/google/callback?code=…</text>
+
+  <!-- footnote -->
+  <text x="60" y="1430" font-size="11" fill="#64748B" font-style="italic">
+    Hard rules: AI keys live ONLY in backend/.env  ·  extension uses PKCE (no client_secret)  ·  PDF/DOCX parsing happens server-side  ·  MV3 service worker (no persistent bg page).
+  </text>
+</svg>

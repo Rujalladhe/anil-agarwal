@@ -16,6 +16,7 @@ import { dirname, join } from 'node:path';
 import {
   mongoUpsertById, mongoUpdateById, mongoDeleteById, mongoDeleteMany
 } from './mongo.js';
+import { deleteResumeVectors as pineconeDeleteResume } from './pinecone.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DB_PATH = process.env.DB_PATH || join(__dirname, 'data.db');
@@ -404,6 +405,11 @@ export function deleteResume(id) {
   mongoDeleteById('resumes', id);
   mongoDeleteMany('chat_threads', { resume_id: id });
   mongoDeleteMany('chat_messages', { resume_id: id });
+  // Pinecone mirror: drop the resume's vectors so they don't surface in
+  // future searches. Fire-and-forget -- if it fails, orphan vectors get
+  // filtered out at read time (the hydrate-from-SQLite join drops any id
+  // whose chunk row no longer exists).
+  pineconeDeleteResume(id).catch(() => {});
   return info.changes;
 }
 
@@ -539,6 +545,11 @@ export function replaceChunksForResume(resumeId, chunksWithEmbeddings) {
     INSERT INTO chunk_vectors (rowid, embedding) VALUES (?, ?)
   `);
 
+  // Collect the SQLite chunk row IDs as we go so the caller (rag.js) can
+  // mirror the same IDs into Pinecone -- both stores share a primary key,
+  // which is what lets the Pinecone read path hydrate text via a SQLite
+  // lookup by id.
+  const chunkIds = [];
   const tx = db.transaction((rid, items) => {
     deleteOldVectors.run(rid);
     deleteOldChunks.run(rid);
@@ -550,9 +561,11 @@ export function replaceChunksForResume(resumeId, chunksWithEmbeddings) {
       // rejects ("Only integers are allows ... on chunk_vectors"). BigInt
       // forces SQLITE_INTEGER binding.
       insertVector.run(BigInt(info.lastInsertRowid), floatsToBlob(embedding));
+      chunkIds.push(Number(info.lastInsertRowid));
     }
   });
   tx(resumeId, chunksWithEmbeddings);
+  return chunkIds;
 }
 
 // ---------------------------------------------------------------------------
@@ -599,6 +612,31 @@ export function searchChunks({ queryEmbedding, topK = 8, resumeId = null }) {
     ORDER BY distance ASC
     LIMIT ?
   `).all(blob, topK);
+}
+
+// Hydrate chunk rows by id, preserving the input order. Used by the Pinecone
+// read path: Pinecone returns ranked chunk_ids, and we look the texts +
+// resume metadata back up locally. Returns the same shape as searchChunks()
+// so the RRF merger can treat both result sets uniformly. Any id that no
+// longer has a chunk row (e.g. resume was deleted and Pinecone hasn't yet
+// caught up) is silently dropped.
+export function hydrateChunksByIds(orderedIds) {
+  if (!orderedIds || orderedIds.length === 0) return [];
+  const db = getDb();
+  const placeholders = orderedIds.map(() => '?').join(',');
+  const rows = db.prepare(`
+    SELECT
+      c.id           AS chunk_id,
+      c.resume_id    AS resume_id,
+      c.chunk_index  AS chunk_index,
+      c.text         AS text,
+      r.candidate_name, r.filename, r.score
+    FROM chunks c
+    JOIN resumes r ON r.id = c.resume_id
+    WHERE c.id IN (${placeholders})
+  `).all(...orderedIds);
+  const byId = new Map(rows.map((r) => [r.chunk_id, r]));
+  return orderedIds.map((id) => byId.get(id)).filter(Boolean);
 }
 
 // ---------------------------------------------------------------------------

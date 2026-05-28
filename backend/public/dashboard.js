@@ -13,6 +13,41 @@ const fmtDate = (ts) => {
 };
 const scoreBand = (s) => (s >= 75 ? 'good' : s >= 50 ? 'warn' : 'bad');
 
+// SVG circular progress ring for resume scores — matches the IncRuiter
+// "Resume Score" column look (navy arc on a light track, % in the center).
+// Animation comes from the CSS transition on .score-ring-arc which sets
+// stroke-dashoffset; we render at full offset then flip it on the next
+// frame so the arc draws in. r=22 → circumference = 2π·22 ≈ 138.23.
+const RING_CIRC = 138.23;
+function scoreRingHTML(score) {
+  if (score == null) {
+    return `<div class="score-ring empty">—</div>`;
+  }
+  const pct = Math.max(0, Math.min(100, Number(score)));
+  const band = scoreBand(pct);
+  // data-pct lets the post-render hook compute the dashoffset once cells exist.
+  return `
+    <div class="score-ring ${band}" data-pct="${pct}">
+      <svg viewBox="0 0 52 52" aria-hidden="true">
+        <circle class="score-ring-track" cx="26" cy="26" r="22"></circle>
+        <circle class="score-ring-arc"   cx="26" cy="26" r="22"
+          stroke-dasharray="${RING_CIRC}" stroke-dashoffset="${RING_CIRC}"></circle>
+      </svg>
+      <span class="score-ring-val">${pct}%</span>
+    </div>`;
+}
+// After the rows are in the DOM, kick each ring's arc to its target
+// offset on the next frame so the CSS transition runs.
+function animateScoreRings(root) {
+  requestAnimationFrame(() => {
+    root.querySelectorAll('.score-ring[data-pct]').forEach((el) => {
+      const pct = Number(el.dataset.pct) || 0;
+      const arc = el.querySelector('.score-ring-arc');
+      if (arc) arc.style.strokeDashoffset = String(RING_CIRC * (1 - pct / 100));
+    });
+  });
+}
+
 function toast(message, type = '') {
   const el = $('toast');
   el.textContent = message;
@@ -33,7 +68,7 @@ async function api(path, opts = {}) {
 
 // =================== View routing ===================
 const VIEW_TITLES = {
-  overview:   { title: 'Overview',   sub: 'At-a-glance metrics across every scored resume.' },
+  overview:   { title: 'Dashboard',  sub: "Welcome back! Here's your recruitment overview" },
   candidates: { title: 'Candidates', sub: 'Search, filter, and inspect every scored resume.' },
   match:      { title: 'JD Match',   sub: 'Paste a job description, get your best-fit candidates ranked.' },
   segregate:  { title: 'Segregate',  sub: 'Upload many JDs — each resume drops into the bucket it fits best.' },
@@ -43,7 +78,9 @@ const VIEW_TITLES = {
 };
 
 function switchView(name) {
-  document.querySelectorAll('.nav-btn').forEach((b) =>
+  // Only the appbar nav drives view switching — the icon sidebar is
+  // purely decorative (product-module branding, no navigation).
+  document.querySelectorAll('.appnav-btn').forEach((b) =>
     b.classList.toggle('active', b.dataset.view === name));
   document.querySelectorAll('.view').forEach((v) =>
     v.classList.toggle('hidden', v.dataset.view !== name));
@@ -54,16 +91,49 @@ function switchView(name) {
   }
   // Lazy-load per-view data so the dashboard boot is snappy.
   if (name === 'candidates') loadCandidates();
-  if (name === 'match')      initMatchIfNeeded();
+  if (name === 'match' && typeof initMatchIfNeeded === 'function') initMatchIfNeeded();
   if (name === 'segregate')  initSegregateIfNeeded();
   if (name === 'chat')       initChatIfNeeded();
   if (name === 'automation' && window.initAutomationIfNeeded) window.initAutomationIfNeeded();
   if (name === 'settings')   loadSettings();
 }
 
-document.querySelectorAll('.nav-btn').forEach((btn) => {
+document.querySelectorAll('.appnav-btn').forEach((btn) => {
   btn.addEventListener('click', () => switchView(btn.dataset.view));
 });
+
+// IncConnect gate: the appbar and main workspace stay hidden behind a
+// body.not-connected class until the user clicks IncConnect (sidebar)
+// or the "Open Workspace" splash button. Persists across reloads so a
+// returning user lands straight in the workspace.
+function openWorkspace() {
+  document.body.classList.remove('not-connected');
+  try { localStorage.setItem('inc_connected', '1'); } catch { /* ignore */ }
+}
+function closeWorkspace() {
+  document.body.classList.add('not-connected');
+  try { localStorage.removeItem('inc_connected'); } catch { /* ignore */ }
+}
+try {
+  if (localStorage.getItem('inc_connected') === '1') {
+    document.body.classList.remove('not-connected');
+  }
+} catch { /* ignore */ }
+$('incConnectBtn')?.addEventListener('click', () => {
+  // Toggle so clicking again can hide the workspace if the user wants to.
+  if (document.body.classList.contains('not-connected')) openWorkspace();
+  else closeWorkspace();
+});
+$('connectSplashBtn')?.addEventListener('click', openWorkspace);
+
+// Deep-link support: ?view=candidates jumps straight to that view on load.
+// Only honors known view names so a bogus value can't break boot.
+{
+  const v = new URLSearchParams(location.search).get('view');
+  if (v && VIEW_TITLES[v]) {
+    document.addEventListener('DOMContentLoaded', () => switchView(v), { once: true });
+  }
+}
 
 // =================== Health =================
 async function checkHealth() {
@@ -87,44 +157,48 @@ function destroyChart(key) {
   if (charts[key]) { charts[key].destroy(); charts[key] = null; }
 }
 
-// Sophisticated, harmonious palette — muted earth tones + sage, no neon.
-// Designed to look intentional even when 8+ categories are visible.
+// InCruiter palette — deep navy + warm orange + soft blues.
+// Alternates between primary navy / accent orange so doughnut & bar charts
+// match the dashboard screenshots' look.
 const CAT_COLORS = [
-  '#3c6e64', // sage-teal (primary)
-  '#6a8e9b', // muted slate-blue
-  '#b78a5a', // warm sand
-  '#9c6b6b', // muted rose
-  '#7a8b5c', // olive
-  '#5e6b80', // dusty navy
-  '#a47c8c', // mauve
-  '#c89653', // amber
-  '#90a58a', // soft sage
-  '#6f5e72', // plum
-  '#6b8f7c', // mint
-  '#a67c70', // clay
-  '#8d8467', // khaki
-  '#5e7d8a', // teal-grey
-  '#9d8aa0'  // dusty mauve
+  '#0f2851', // navy (primary)
+  '#f5a14a', // orange (accent)
+  '#3b6fb4', // mid blue
+  '#f7c074', // soft amber
+  '#5d83bf', // slate blue
+  '#b75c2a', // burnt orange
+  '#8aa6d4', // pale blue
+  '#d68c2a', // amber
+  '#1f3f72', // deep navy
+  '#f1b06a', // peach
+  '#274d8a', // royal navy
+  '#c46a3a', // rust
+  '#7e9bc8', // dusty blue
+  '#e0954a', // mid orange
+  '#456e9c'  // steel
 ];
 
-// Status palette mirrored from CSS tokens.
+// Status palette mirrored from CSS tokens (Figma reskin).
 const COLOR = {
-  good:     '#3f7e5e',
-  goodSoft: '#e3efe6',
-  warn:     '#a06b1f',
-  warnSoft: '#f7ecd1',
-  bad:      '#9f3a3a',
-  badSoft:  '#f5e0e0',
-  primary:  '#3c6e64',
-  primaryFill: 'rgba(60, 110, 100, 0.12)',
-  grid:     '#efece6',
-  axis:     '#a8a29e',
-  text:     '#44403c'
+  good:     '#18ac00',
+  goodSoft: '#e8f7e6',
+  warn:     '#e8aa4e',
+  warnSoft: '#fdf7ed',
+  bad:      '#f2464b',
+  badSoft:  '#feeded',
+  primary:  '#133f7d',
+  primaryFill: 'rgba(19, 63, 125, 0.12)',
+  primaryLine: '#1e40af',
+  accent:   '#12b6bc',
+  accentFill: 'rgba(18, 182, 188, 0.18)',
+  grid:     '#e2e8f0',
+  axis:     '#a3a3a3',
+  text:     '#4b5563'
 };
 
 // Apply globally so every chart inherits the same axis/legend look.
 if (window.Chart) {
-  Chart.defaults.font.family = "'Inter', 'SF Pro Display', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif";
+  Chart.defaults.font.family = "'Manrope', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif";
   Chart.defaults.font.size = 11.5;
   Chart.defaults.color = COLOR.text;
   Chart.defaults.borderColor = COLOR.grid;
@@ -158,6 +232,8 @@ function renderOverview(s) {
   renderTimelineChart(s.timeline);
   renderBreakdownChart(s.breakdownAvg);
   renderYearsChart(s.yearBuckets);
+  renderCompaniesChart(s.topCompanies || []);
+  renderEducationChart(s.educationBreakdown || []);
 }
 
 function renderCategoryChart(data) {
@@ -200,11 +276,7 @@ function renderScoreChart(buckets) {
       datasets: [{
         label: 'Candidates',
         data: buckets.map((b) => b.count),
-        backgroundColor: buckets.map((b, i) => {
-          if (i >= 8) return COLOR.good;
-          if (i >= 5) return COLOR.warn;
-          return COLOR.bad;
-        }),
+        backgroundColor: COLOR.primary,
         borderRadius: 4,
         borderSkipped: false,
         maxBarThickness: 28
@@ -233,7 +305,7 @@ function renderBandsChart(bands) {
       labels: ['Strong (75+)', 'Mid (50-74)', 'Low (<50)'],
       datasets: [{
         data: [bands.good || 0, bands.warn || 0, bands.bad || 0],
-        backgroundColor: [COLOR.good, COLOR.warn, COLOR.bad],
+        backgroundColor: [COLOR.primary, COLOR.accent, '#c4d0e2'],
         borderWidth: 3,
         borderColor: '#ffffff',
         hoverOffset: 6
@@ -243,7 +315,18 @@ function renderBandsChart(bands) {
       responsive: true, maintainAspectRatio: false,
       cutout: '64%',
       plugins: {
-        legend: { position: 'bottom', labels: { boxWidth: 8, boxHeight: 8, padding: 12, font: { size: 11 } } },
+        legend: {
+          position: 'bottom',
+          labels: {
+            usePointStyle: true,
+            pointStyle: 'circle',
+            boxWidth: 8,
+            boxHeight: 8,
+            padding: 12,
+            font: { size: 12, family: 'Manrope', weight: '400' },
+            color: '#020817'
+          }
+        },
         tooltip: { backgroundColor: '#1c1917', padding: 10, cornerRadius: 6, displayColors: false }
       }
     }
@@ -261,13 +344,20 @@ function renderTimelineChart(timeline) {
         label: 'Resumes',
         data: timeline.map((t) => t.count),
         borderColor: COLOR.primary,
-        backgroundColor: COLOR.primaryFill,
+        backgroundColor: (c) => {
+          const { ctx: cc, chartArea } = c.chart;
+          if (!chartArea) return '#133f7d';
+          const g = cc.createLinearGradient(0, chartArea.top, 0, chartArea.bottom);
+          g.addColorStop(0.05, '#133f7d');
+          g.addColorStop(0.95, 'rgba(18, 182, 188, 0.1)');
+          return g;
+        },
         fill: true,
         tension: 0.4,
         pointRadius: 0,
         pointHoverRadius: 5,
-        pointHoverBackgroundColor: COLOR.primary,
-        pointHoverBorderColor: '#ffffff',
+        pointHoverBackgroundColor: '#ffffff',
+        pointHoverBorderColor: COLOR.primary,
         pointHoverBorderWidth: 2,
         borderWidth: 2
       }]
@@ -280,8 +370,12 @@ function renderTimelineChart(timeline) {
         tooltip: { backgroundColor: '#1c1917', padding: 10, cornerRadius: 6, displayColors: false }
       },
       scales: {
-        y: { beginAtZero: true, ticks: { precision: 0 }, grid: { color: COLOR.grid }, border: { display: false } },
-        x: { grid: { display: false }, ticks: { font: { size: 10 } }, border: { color: COLOR.grid } }
+        y: { beginAtZero: true, ticks: { display: false }, grid: { display: false }, border: { display: false } },
+        x: {
+          grid: { color: 'rgba(255,255,255,0.9)', drawTicks: false, lineWidth: 1.2, borderDash: [5, 5] },
+          ticks: { font: { size: 10 }, color: COLOR.text },
+          border: { display: false }
+        }
       }
     }
   });
@@ -336,7 +430,7 @@ function renderYearsChart(buckets) {
       datasets: [{
         label: 'Candidates',
         data: buckets.map((b) => b.count),
-        backgroundColor: '#6a8e9b',
+        backgroundColor: COLOR.primary,
         borderRadius: 4,
         borderSkipped: false,
         maxBarThickness: 22
@@ -357,6 +451,145 @@ function renderYearsChart(buckets) {
   });
 }
 
+function renderCompaniesChart(rows) {
+  destroyChart('companies');
+  const ctx = $('chartCompanies'); if (!ctx) return;
+  if (!rows.length) {
+    // Wipe the canvas so an "empty" state reads as such instead of a stale chart.
+    const c = ctx.getContext('2d');
+    c.clearRect(0, 0, ctx.width, ctx.height);
+    return;
+  }
+  // Trim labels so very long company names don't break the y-axis.
+  const trim = (s, n = 22) => (s && s.length > n ? s.slice(0, n - 1) + '…' : s);
+  charts.companies = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: rows.map((r) => trim(r.company)),
+      datasets: [{
+        label: 'Candidates',
+        data: rows.map((r) => r.count),
+        backgroundColor: COLOR.accent,
+        borderRadius: 4,
+        borderSkipped: false,
+        maxBarThickness: 22
+      }]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      indexAxis: 'y',
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          backgroundColor: '#1c1917', padding: 10, cornerRadius: 6, displayColors: false,
+          // Show the full (untrimmed) company name in the tooltip.
+          callbacks: { title: (items) => rows[items[0].dataIndex]?.company || '' }
+        }
+      },
+      scales: {
+        x: { beginAtZero: true, ticks: { precision: 0 }, grid: { color: COLOR.grid }, border: { display: false } },
+        y: { grid: { display: false }, border: { color: COLOR.grid } }
+      }
+    }
+  });
+}
+
+const EDU_COLORS = ['#0f2851', '#3b6fb4', '#12b6bc', '#f5a14a', '#94a3b8'];
+
+function renderEducationChart(rows) {
+  destroyChart('education');
+  const ctx = $('chartEducation'); if (!ctx) return;
+  const legend = $('eduLegend');
+  const insights = $('eduInsights');
+  if (legend) legend.innerHTML = '';
+  if (insights) insights.innerHTML = '';
+
+  if (!rows.length) {
+    const c = ctx.getContext('2d');
+    c.clearRect(0, 0, ctx.width, ctx.height);
+    if (legend) legend.innerHTML = '<li class="muted small">No education data on file yet.</li>';
+    return;
+  }
+  const total = rows.reduce((sum, r) => sum + r.count, 0) || 1;
+  const colors = rows.map((_, i) => EDU_COLORS[i % EDU_COLORS.length]);
+  const sorted = rows.map((r, i) => ({ ...r, color: colors[i] }))
+    .sort((a, b) => b.count - a.count);
+  const top = sorted[0];
+  const advanced = rows
+    .filter((r) => /master|phd|doctor/i.test(r.label))
+    .reduce((s, r) => s + r.count, 0);
+  const known = total - (rows.find((r) => /other|unknown/i.test(r.label))?.count || 0);
+
+  if (insights) {
+    const advancedPct = Math.round((advanced / total) * 100);
+    const knownPct = Math.round((known / total) * 100);
+    insights.innerHTML = `
+      <div class="edu-insight">
+        <div class="edu-insight-label">Most common</div>
+        <div class="edu-insight-value"></div>
+        <div class="edu-insight-sub">${top.count} candidates · ${Math.round((top.count / total) * 100)}% of pipeline</div>
+      </div>
+      <div class="edu-insight">
+        <div class="edu-insight-label">Advanced degrees</div>
+        <div class="edu-insight-value">${advanced} <span style="font-size:13px;font-weight:500;color:#64748b;">(${advancedPct}%)</span></div>
+        <div class="edu-insight-sub">Master's, PhD or doctoral candidates</div>
+      </div>
+      <div class="edu-insight">
+        <div class="edu-insight-label">Pipeline coverage</div>
+        <div class="edu-insight-value">${known} / ${total}</div>
+        <div class="edu-insight-sub">${knownPct}% have identifiable education on file</div>
+      </div>
+    `;
+    insights.querySelector('.edu-insight-value').textContent = top.label;
+  }
+
+  charts.education = new Chart(ctx, {
+    type: 'doughnut',
+    data: {
+      labels: rows.map((r) => r.label),
+      datasets: [{
+        data: rows.map((r) => r.count),
+        backgroundColor: colors,
+        borderWidth: 3,
+        borderColor: '#ffffff',
+        hoverOffset: 6
+      }]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      cutout: '62%',
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          backgroundColor: '#1c1917', padding: 10, cornerRadius: 6, displayColors: false,
+          callbacks: {
+            label: (item) => {
+              const pct = Math.round((item.parsed / total) * 100);
+              return `${item.label}: ${item.parsed} (${pct}%)`;
+            }
+          }
+        }
+      }
+    }
+  });
+
+  if (!legend) return;
+  rows.forEach((r, i) => {
+    const pct = Math.round((r.count / total) * 100);
+    const li = document.createElement('li');
+    li.className = 'edu-legend-item';
+    li.innerHTML = `
+      <span class="edu-dot" style="background:${colors[i]};"></span>
+      <span class="edu-label"></span>
+      <span class="edu-count">${r.count}</span>
+      <span class="edu-pct muted small">${pct}%</span>
+      <span class="edu-bar"><span style="width:${pct}%;background:${colors[i]};"></span></span>
+    `;
+    li.querySelector('.edu-label').textContent = r.label;
+    legend.appendChild(li);
+  });
+}
+
 function renderTopSkills(skills) {
   const el = $('topSkills');
   el.innerHTML = '';
@@ -365,11 +598,36 @@ function renderTopSkills(skills) {
     return;
   }
   for (const s of skills) {
-    const chip = document.createElement('div');
+    const chip = document.createElement('button');
+    chip.type = 'button';
     chip.className = 'skill-chip';
-    chip.innerHTML = `${s.skill}<span class="count">${s.count}</span>`;
+    chip.title = `Show candidates with "${s.skill}"`;
+    chip.innerHTML = `<span class="skill-label"></span><span class="count">${s.count}</span>`;
+    chip.querySelector('.skill-label').textContent = s.skill;
+    chip.addEventListener('click', () => filterCandidatesBySkill(s.skill));
     el.appendChild(chip);
   }
+}
+
+// Jump from any "skill chip" on the overview to the Candidates view with the
+// search box pre-filled. searchResumes() already LIKE-matches the `q` param
+// against top_skills + raw_text, so a plain skill name is enough to drive the
+// filter end-to-end.
+function filterCandidatesBySkill(skill) {
+  switchView('candidates');
+  // switchView triggers loadCandidates() asynchronously; set the inputs
+  // first so the very next load reads them.
+  const input = $('searchInput');
+  const cat   = $('categoryFilter');
+  const score = $('minScoreFilter');
+  const years = $('minYearsFilter');
+  if (input) input.value = skill;
+  if (cat)   cat.value = '';
+  if (score) score.value = '';
+  if (years) years.value = '';
+  // Re-run loadCandidates with the new query (switchView already called it,
+  // but with the prior empty input — this guarantees the filter is applied).
+  if (typeof loadCandidates === 'function') loadCandidates();
 }
 
 function renderRecent(items) {
@@ -442,60 +700,93 @@ async function loadCandidates() {
     $('candidatesStatus').textContent = `${results.length} candidate${results.length === 1 ? '' : 's'}`;
   } catch (err) {
     $('candidatesStatus').textContent = '';
-    body.innerHTML = `<tr><td colspan="8" class="muted">Could not load: ${err.message}</td></tr>`;
+    body.innerHTML = `<tr><td colspan="6" class="muted">Could not load: ${err.message}</td></tr>`;
   }
+}
+
+const PIPELINE_STATUS = [
+  { min: 80, key: 'completed',  label: 'Completed'   },
+  { min: 65, key: 'inprogress', label: 'In Progress' },
+  { min: 50, key: 'scheduled',  label: 'Scheduled'   },
+  { min: 40, key: 'followup',   label: 'Follow-up'   },
+  { min: 0,  key: 'rejected',   label: 'Resume Rejected' }
+];
+function deriveStatus(score) {
+  if (score == null) return { key: 'pending', label: 'Pending' };
+  return PIPELINE_STATUS.find((s) => score >= s.min) || PIPELINE_STATUS[PIPELINE_STATUS.length - 1];
+}
+
+function fmtUpdated(ts) {
+  if (!ts) return '<span class="muted">—</span>';
+  const d = new Date(typeof ts === 'number' ? ts : ts);
+  const date = d.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: '2-digit', year: 'numeric' });
+  const time = d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+  return `<div class="upd-date">${date}</div><div class="upd-time">${time}</div>`;
+}
+
+// "Posted By" isn't stored — derive a stable display from the file/source so
+// the column reads sensibly without inventing a recruiter name per row.
+function postedByCell(r) {
+  const name = 'Auto-import';
+  const when = r.created_at
+    ? new Date(r.created_at).toLocaleString(undefined, { weekday: 'short', month: 'short', day: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' })
+    : '';
+  return `<div class="upd-date">${name}</div><div class="upd-time">${when}</div>`;
+}
+
+function applicantId(id) {
+  return `#CAN${String(id).padStart(5, '0')}`;
+}
+
+function contactCell(r) {
+  const phone = r.phone ? `+91-${String(r.phone).replace(/^\+?91-?/, '')}` : '';
+  const email = r.email || '';
+  return `
+    ${phone ? `<div class="contact-phone">${phone}</div>` : ''}
+    ${email ? `<div class="contact-email">${email}</div>` : ''}
+    ${!phone && !email ? '<span class="muted">—</span>' : ''}
+  `;
 }
 
 function renderCandidates(rows) {
   const body = $('candidatesBody');
   body.innerHTML = '';
   if (!rows.length) {
-    body.innerHTML = '<tr><td colspan="8" class="muted">No candidates match.</td></tr>';
+    body.innerHTML = '<tr><td colspan="6" class="muted">No candidates match.</td></tr>';
     return;
   }
-  for (let i = 0; i < rows.length; i++) {
-    const r = rows[i];
-    const band = scoreBand(r.score || 0);
+  rows.forEach((r, i) => {
     const tr = document.createElement('tr');
     tr.innerHTML = `
-      <td>${i + 1}</td>
-      <td>
+      <td class="cell-num">${i + 1}</td>
+      <td class="cell-candidate">
         <div class="cand-name"></div>
-        <div class="cand-meta"></div>
+        <div class="cand-role"></div>
       </td>
-      <td>
-        <div></div>
-        <div class="cand-meta"></div>
-      </td>
-      <td><span class="cat-badge"></span></td>
-      <td>${r.years_experience != null ? Math.round(r.years_experience) : '—'}</td>
-      <td class="cand-skills"></td>
-      <td><span class="score-pill ${band}">${r.score ?? '—'}</span></td>
-      <td>
-        <div class="row-actions">
-          <button class="btn ghost small" data-act="view">View</button>
-          <button class="btn ghost small" data-act="chat">Chat</button>
-        </div>
+      <td class="cell-contact">${contactCell(r)}</td>
+      <td class="cell-updated">${fmtUpdated(r.created_at)}</td>
+      <td class="cell-score">${scoreRingHTML(r.score)}</td>
+      <td class="cell-actions">
+        <button class="row-icon-btn" data-act="view" title="View" aria-label="View">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+            <path d="M1.5 8s2.5-4.5 6.5-4.5S14.5 8 14.5 8s-2.5 4.5-6.5 4.5S1.5 8 1.5 8z" stroke="currentColor" stroke-width="1.2"/>
+            <circle cx="8" cy="8" r="2" stroke="currentColor" stroke-width="1.2"/>
+          </svg>
+        </button>
+        <button class="row-icon-btn" data-act="chat" title="Chat" aria-label="Chat">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+            <path d="M2.5 3.5h11a1 1 0 011 1v6a1 1 0 01-1 1H6l-3 2.5v-2.5H2.5a1 1 0 01-1-1v-6a1 1 0 011-1z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>
+          </svg>
+        </button>
       </td>
     `;
     tr.querySelector('.cand-name').textContent = r.candidate_name || r.filename;
-    tr.querySelector('.cand-meta').textContent =
-      [r.email, r.location].filter(Boolean).join(' · ') || r.filename;
-    const cells = tr.querySelectorAll('td');
-    cells[2].querySelector('div:first-child').textContent = r.role_title || r.current_title || '—';
-    cells[2].querySelector('.cand-meta').textContent = r.current_company || '';
-    tr.querySelector('.cat-badge').textContent = r.category || '—';
-    const sk = tr.querySelector('.cand-skills');
-    (r.top_skills || []).slice(0, 5).forEach((s) => {
-      const chip = document.createElement('span');
-      chip.className = 'chip';
-      chip.textContent = s;
-      sk.appendChild(chip);
-    });
+    tr.querySelector('.cand-role').textContent = r.role_title || r.current_title || '—';
     tr.querySelector('[data-act="view"]').addEventListener('click', () => openCandidate(r.id));
     tr.querySelector('[data-act="chat"]').addEventListener('click', () => startChatForResume(r));
     body.appendChild(tr);
-  }
+  });
+  animateScoreRings(body);
 }
 
 $('applyFiltersBtn').addEventListener('click', loadCandidates);
@@ -508,6 +799,29 @@ $('clearFiltersBtn').addEventListener('click', () => {
 });
 $('searchInput').addEventListener('keydown', (e) => {
   if (e.key === 'Enter') { e.preventDefault(); loadCandidates(); }
+});
+
+$('candRefreshBtn').addEventListener('click', () => loadCandidates());
+$('candFiltersBtn').addEventListener('click', () => {
+  const panel = $('candFiltersPanel');
+  const open = panel.classList.toggle('hidden');
+  $('candFiltersBtn').classList.toggle('active', !open);
+});
+$('candExportBtn').addEventListener('click', async () => {
+  try {
+    const res = await fetch(API + '/resumes/export.xlsx');
+    if (!res.ok) throw new Error(`backend ${res.status}`);
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `resumes-${new Date().toISOString().slice(0, 10)}.xlsx`;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+    toast('Excel downloaded.', 'success');
+  } catch (err) {
+    toast(`Export failed: ${err.message}`, 'error');
+  }
 });
 
 // =================== Candidate detail modal ===================
@@ -1101,118 +1415,6 @@ $('exportBtn').addEventListener('click', async () => {
     toast(`Export failed: ${err.message}`, 'error');
   }
 });
-
-// =================== JD Match ===================
-let matchState = { inited: false, running: false };
-
-function initMatchIfNeeded() {
-  // Always refresh the name cache so newly-scored candidates show up in
-  // citations + match results without a full page reload.
-  populateResumePicker().catch(() => {});
-
-  if (matchState.inited) return;
-  matchState.inited = true;
-
-  $('jdRunBtn').addEventListener('click', runJdMatch);
-  $('jdClearBtn').addEventListener('click', () => {
-    $('jdInput').value = '';
-    $('jdResults').innerHTML = '';
-    $('jdStatus').textContent = '';
-    $('jdInput').focus();
-  });
-  $('jdInput').addEventListener('keydown', (e) => {
-    // Cmd/Ctrl + Enter to submit -- recruiters paste big blobs, so keep
-    // plain Enter for new lines.
-    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-      e.preventDefault();
-      runJdMatch();
-    }
-  });
-}
-
-async function runJdMatch() {
-  if (matchState.running) return;
-  const text = $('jdInput').value.trim();
-  if (text.length < 20) {
-    toast('Paste a longer job description first.', 'error');
-    return;
-  }
-  const topK = Number($('jdTopK').value) || 5;
-  const reasons = $('jdReasons').checked;
-
-  matchState.running = true;
-  $('jdRunBtn').disabled = true;
-  $('jdResults').innerHTML = '';
-  $('jdStatus').textContent = reasons
-    ? `Embedding JD and ranking candidates… AI reasons take ~3–6 seconds.`
-    : `Embedding JD and ranking candidates…`;
-
-  try {
-    const t0 = performance.now();
-    const out = await api('/match', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ jobDescription: text, topK, reasons })
-    });
-    const ms = Math.round(performance.now() - t0);
-    renderJdResults(out.results || []);
-    const n = out.results?.length || 0;
-    $('jdStatus').textContent = n
-      ? `${n} candidate${n === 1 ? '' : 's'} ranked in ${ms} ms.`
-      : `No matches — score some resumes first.`;
-  } catch (err) {
-    $('jdStatus').textContent = `Could not match: ${err.message}`;
-  } finally {
-    matchState.running = false;
-    $('jdRunBtn').disabled = false;
-  }
-}
-
-function renderJdResults(rows) {
-  const wrap = $('jdResults');
-  wrap.innerHTML = '';
-  if (!rows.length) {
-    const empty = document.createElement('div');
-    empty.className = 'jd-empty';
-    empty.textContent = 'No candidates in your pipeline yet. Score some resumes from Outlook first.';
-    wrap.appendChild(empty);
-    return;
-  }
-  rows.forEach((r, i) => {
-    const card = document.createElement('div');
-    card.className = 'jd-card';
-    const band = scoreBand(r.score || 0);
-    card.innerHTML = `
-      <div class="jd-rank">#${i + 1}</div>
-      <div class="jd-head">
-        <div>
-          <div class="jd-name"></div>
-          <div class="jd-meta"></div>
-        </div>
-        <div class="jd-scores">
-          <span class="score-pill ${band}">${r.score ?? '—'}</span>
-          <span class="jd-fit"><span class="fit-dot"></span>${r.matchScore}% fit</span>
-        </div>
-      </div>
-      <div class="jd-reason"></div>
-      <div class="jd-excerpt"></div>
-      <div class="jd-actions">
-        <button class="btn ghost small" data-act="view">View</button>
-        <button class="btn ghost small" data-act="more">Excerpt</button>
-        <button class="btn ghost small" data-act="chat">Chat</button>
-      </div>
-    `;
-    card.querySelector('.jd-name').textContent = r.candidateName || r.filename || `Resume #${r.resumeId}`;
-    card.querySelector('.jd-meta').textContent = r.filename && r.filename !== r.candidateName ? r.filename : '';
-    card.querySelector('.jd-reason').textContent = r.reason || (r.bestExcerpt ? '(no AI reason — see excerpt)' : '');
-    card.querySelector('.jd-excerpt').textContent = r.bestExcerpt || '';
-    card.querySelector('[data-act="view"]').addEventListener('click', () => openCandidate(r.resumeId));
-    card.querySelector('[data-act="more"]').addEventListener('click', () => card.classList.toggle('expanded'));
-    card.querySelector('[data-act="chat"]').addEventListener('click', () =>
-      startChatForResume({ id: r.resumeId, candidate_name: r.candidateName, filename: r.filename }));
-    wrap.appendChild(card);
-  });
-}
 
 // =================== Segregate (bulk JD bucketing) ===================
 // State holds the user's queued JDs only; the buckets returned by /segregate

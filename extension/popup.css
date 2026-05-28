@@ -1,33 +1,35 @@
 /* ================================================================
    Resume Scorer — extension popup styles.
-   Matches the dashboard's warm cream + sage-teal palette so the
+   Matches the InCruiter dashboard navy + orange palette so the
    extension and the web app feel like one product.
    ================================================================ */
 
 :root {
-  --bg:           #f8f7f4;
+  --bg:           #f4f6fa;
   --panel:        #ffffff;
-  --panel-2:      #f5f3ef;
-  --text:         #1c1917;
-  --text-soft:    #44403c;
-  --muted:        #78716c;
-  --muted-2:      #a8a29e;
-  --border:       #e7e5e0;
-  --border-soft:  #efece6;
-  --primary:      #3c6e64;
-  --primary-hover:#2d5650;
-  --primary-soft: #e9f1ee;
-  --primary-deep: #244841;
-  --primary-ring: rgba(60, 110, 100, 0.18);
-  --good:         #3f7e5e;
-  --good-soft:    #e3efe6;
-  --warn:         #a06b1f;
-  --warn-soft:    #f7ecd1;
-  --bad:          #9f3a3a;
-  --bad-soft:     #f5e0e0;
-  --shadow-xs:    0 1px 1px rgba(28, 25, 23, 0.04);
-  --shadow-sm:    0 1px 2px rgba(28, 25, 23, 0.05);
-  --shadow-md:    0 4px 14px rgba(28, 25, 23, 0.07);
+  --panel-2:      #f5f7fb;
+  --text:         #0f2851;
+  --text-soft:    #334966;
+  --muted:        #6b7c93;
+  --muted-2:      #a3b0c2;
+  --border:       #e0e6ef;
+  --border-soft:  #eef1f6;
+  --primary:      #0f2851;
+  --primary-hover:#0a1d3f;
+  --primary-soft: #e6ecf5;
+  --primary-deep: #061635;
+  --primary-ring: rgba(15, 40, 81, 0.18);
+  --accent:       #f5a14a;
+  --accent-soft:  #fdf0de;
+  --good:         #2e9466;
+  --good-soft:    #dff3e9;
+  --warn:         #d68c2a;
+  --warn-soft:    #fbecd1;
+  --bad:          #d04848;
+  --bad-soft:     #fadede;
+  --shadow-xs:    0 1px 1px rgba(15, 40, 81, 0.05);
+  --shadow-sm:    0 1px 2px rgba(15, 40, 81, 0.06);
+  --shadow-md:    0 4px 14px rgba(15, 40, 81, 0.08);
   --radius-sm:    8px;
   --radius:       10px;
 }
@@ -45,9 +47,7 @@ html, body {
   -moz-osx-font-smoothing: grayscale;
 }
 
-/* Side-panel layout: fill the panel width (Chrome gives us ~320-480px
-   depending on user resize). No max-width cap — let it grow with the
-   panel. Tighter padding than tab mode since horizontal space is tight. */
+/* Side-panel layout: fill the panel width. */
 body {
   width: 100%;
   min-width: 320px;
@@ -80,10 +80,11 @@ body {
   font-weight: 600;
   font-size: 13.5px;
   letter-spacing: -0.01em;
+  color: var(--primary);
 }
 .brand img {
   border-radius: 7px;
-  background: linear-gradient(140deg, #3c6e64 0%, #244841 100%);
+  background: linear-gradient(140deg, #0f2851 0%, #061635 100%);
   padding: 2px;
 }
 .actions {
@@ -131,7 +132,7 @@ body {
 }
 .tab:hover { color: var(--text); }
 .tab.active {
-  color: var(--primary-deep);
+  color: var(--primary);
   border-bottom-color: var(--primary);
   font-weight: 600;
 }
@@ -163,7 +164,7 @@ button:disabled { opacity: 0.55; cursor: not-allowed; }
   width: 100%;
   font-weight: 600;
   padding: 10px 12px;
-  box-shadow: 0 1px 1px rgba(36, 72, 65, 0.20);
+  box-shadow: 0 1px 2px rgba(15, 40, 81, 0.22);
 }
 .primary:hover:not(:disabled) { background: var(--primary-hover); }
 
@@ -173,7 +174,7 @@ button:disabled { opacity: 0.55; cursor: not-allowed; }
   color: var(--text-soft);
   font-weight: 500;
 }
-.secondary:hover:not(:disabled) { background: var(--panel-2); border-color: #d6d3cc; }
+.secondary:hover:not(:disabled) { background: var(--panel-2); border-color: #cfd6e2; }
 
 /* ===================== Connect picker (auth panel) ===================== */
 .connect-grid {
@@ -193,7 +194,7 @@ button:disabled { opacity: 0.55; cursor: not-allowed; }
   background: var(--panel);
 }
 .connect-row.connected {
-  border-color: #c8ddd2;
+  border-color: #c4d4ed;
   background: var(--primary-soft);
 }
 .connect-info { min-width: 0; }
@@ -204,7 +205,6 @@ button:disabled { opacity: 0.55; cursor: not-allowed; }
 .connect-status { margin-top: 2px; }
 .connect-row .secondary { padding: 6px 12px; font-size: 12px; }
 
-/* Source badge that tags each card with where the resume came from. */
 .badge-source {
   background: var(--panel-2);
   color: var(--text-soft);
@@ -213,14 +213,14 @@ button:disabled { opacity: 0.55; cursor: not-allowed; }
   letter-spacing: 0;
   font-weight: 500;
 }
-.badge-source.outlook { background: #e6efff; color: #1d4f9a; border-color: #c4d6f4; }
-.badge-source.gmail   { background: #fde9e6; color: #a8351f; border-color: #f5cbc3; }
+.badge-source.outlook { background: #e6ecf5; color: #0f2851; border-color: #c4d4ed; }
+.badge-source.gmail   { background: #fdebd1; color: #b75c2a; border-color: #f5d3a3; }
 
 /* ===================== Error / empty ===================== */
 .error {
   color: var(--bad);
   background: var(--bad-soft);
-  border: 1px solid #ebcccc;
+  border: 1px solid #f1c5c5;
   padding: 9px 11px;
   border-radius: var(--radius-sm);
   margin-top: 10px;
@@ -307,7 +307,7 @@ button:disabled { opacity: 0.55; cursor: not-allowed; }
 .badge-good {
   background: var(--good-soft);
   color: var(--good);
-  border-color: #c8dccd;
+  border-color: #c4e5d2;
 }
 .badge-pending {
   background: var(--panel-2);
@@ -317,12 +317,12 @@ button:disabled { opacity: 0.55; cursor: not-allowed; }
 .badge-bad {
   background: var(--bad-soft);
   color: var(--bad);
-  border-color: #ebcccc;
+  border-color: #f1c5c5;
 }
 .badge-cat {
   background: var(--primary-soft);
-  color: var(--primary-deep);
-  border-color: #c8ddd2;
+  color: var(--primary);
+  border-color: #c4d4ed;
 }
 
 .result-tags {
@@ -359,8 +359,6 @@ button:disabled { opacity: 0.55; cursor: not-allowed; }
 }
 .rank-row {
   display: grid;
-  /* minmax(0, 1fr) lets the name/meta column shrink past its content size
-     so a long filename can't push the score + Summarize button off-screen. */
   grid-template-columns: 26px minmax(0, 1fr) auto auto;
   align-items: center;
   gap: 8px;
@@ -382,8 +380,6 @@ button:disabled { opacity: 0.55; cursor: not-allowed; }
   text-align: center;
   font-variant-numeric: tabular-nums;
 }
-/* The unclassed wrapper div that holds name+meta. Needs min-width:0 so its
-   nowrap children can ellipsis instead of bullying the grid track. */
 .rank-row > div { min-width: 0; }
 .rank-row .rank-name {
   font-weight: 600;
@@ -422,7 +418,7 @@ button:disabled { opacity: 0.55; cursor: not-allowed; }
   background: white;
   border: 1px solid var(--border);
   border-radius: 999px;
-  color: var(--primary-deep);
+  color: var(--primary);
   font-weight: 500;
   white-space: nowrap;
   cursor: pointer;
@@ -496,10 +492,10 @@ button:disabled { opacity: 0.55; cursor: not-allowed; }
   background: var(--panel-2);
   border: 3px solid var(--primary);
   font-size: 20px;
-  font-weight: 600;
+  font-weight: 700;
   flex-shrink: 0;
   font-variant-numeric: tabular-nums;
-  color: var(--primary-deep);
+  color: var(--primary);
 }
 .score-circle.good { border-color: var(--good); color: var(--good); }
 .score-circle.warn { border-color: var(--warn); color: var(--warn); }
@@ -580,9 +576,7 @@ button:disabled { opacity: 0.55; cursor: not-allowed; }
 }
 ::-webkit-scrollbar-thumb:hover { background-color: var(--muted-2); background-clip: padding-box; }
 
-/* Auto-score toggle (iOS-style switch). Lives in the inbox toolbar next to
-   the Refresh button. Bound to chrome.storage.local key auto_score_enabled_v1
-   which background.js checks before each poll. */
+/* Auto-score toggle (iOS-style switch). */
 .toggle {
   display: inline-flex;
   align-items: center;

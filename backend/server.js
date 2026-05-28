@@ -15,9 +15,10 @@
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
+import helmet from 'helmet';
 import { promises as fs } from 'node:fs';
 import { existsSync, mkdirSync } from 'node:fs';
-import { dirname, join, extname } from 'node:path';
+import { dirname, join, extname, resolve as resolvePath, sep as pathSep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { EventEmitter } from 'node:events';
 import ExcelJS from 'exceljs';
@@ -27,7 +28,6 @@ import { scoreResume } from './ai.js';
 import { classifyAsResume } from './classify.js';
 import { indexResume } from './rag.js';
 import { chat, chatStream, summarizeText } from './chat.js';
-import { matchJobDescription, matchJobDescriptionWithReasons } from './match.js';
 import { segregateResumes } from './segregate.js';
 import { searchResumes, parseRecruiterQuery, getStats } from './search.js';
 import {
@@ -60,8 +60,43 @@ if (!existsSync(UPLOADS_DIR)) mkdirSync(UPLOADS_DIR, { recursive: true });
 
 const app = express();
 
+// Behind a reverse proxy (Render, Fly, nginx, Cloudflare) we need this so
+// req.secure / req.ip reflect the real client, not the proxy. Required for
+// the HTTPS redirect below and for express-rate-limit's per-IP keying.
+app.set('trust proxy', 1);
+
+// helmet sets a stack of safe-default security headers:
+//   - Strict-Transport-Security (HSTS): tells browsers "only ever talk to me
+//     over HTTPS for the next year", so a coffee-shop attacker can't downgrade
+//     a future session to HTTP and sniff it.
+//   - X-Content-Type-Options: nosniff, X-Frame-Options: deny, Referrer-Policy,
+//     and a handful of other small wins.
+// We disable CSP because it interferes with the inline scripts in the
+// dashboard SPA. We also relax the cross-origin policies because:
+//   - The Chrome extension (origin chrome-extension://...) needs to read
+//     responses from this backend. helmet's default CORP "same-origin"
+//     would block that.
+//   - The dashboard fetches resume PDFs and embeds them inline.
+app.use(helmet({
+  contentSecurityPolicy: false,
+  crossOriginResourcePolicy: { policy: 'cross-origin' },
+  crossOriginOpenerPolicy: false,
+  crossOriginEmbedderPolicy: false,
+  hsts: { maxAge: 31536000, includeSubDomains: true, preload: true }
+}));
+
+// Force HTTPS in production. In dev (NODE_ENV !== 'production') we stay on
+// plain HTTP so localhost works without a cert.
+if (process.env.NODE_ENV === 'production') {
+  app.use((req, res, next) => {
+    if (req.secure || req.headers['x-forwarded-proto'] === 'https') return next();
+    return res.redirect(301, `https://${req.headers.host}${req.url}`);
+  });
+}
+
 // 10 MB is plenty for a resume attachment (base64 inflates by ~33%).
-app.use(express.json({ limit: '15mb' }));
+// Lowered from 15 MB to shrink the surface area for memory-pressure DoS.
+app.use(express.json({ limit: '10mb' }));
 app.use(cors()); // MVP: allow any origin, including chrome-extension://...
 
 // Serve the dashboard SPA from /. GET / -> public/index.html, all other
@@ -384,7 +419,18 @@ app.get('/resumes/:id/file', (req, res) => {
   if (!resume) return res.status(404).json({ error: 'Resume not found.' });
   if (!resume.file_path) return res.status(404).json({ error: 'No file stored for this resume.' });
 
-  const abs = join(__dirname, resume.file_path);
+  // Path-traversal guard. resume.file_path comes from the DB -- which today we
+  // populate ourselves, but if anything in the future lets a user influence
+  // it (an import script, a re-ingestion tool) a value like
+  // "../../../etc/passwd" would otherwise read arbitrary files off disk.
+  // Resolve both sides to absolute, normalized paths, then require the file's
+  // path to live INSIDE the uploads directory.
+  const abs = resolvePath(join(__dirname, resume.file_path));
+  const safeRoot = resolvePath(UPLOADS_DIR);
+  if (abs !== safeRoot && !abs.startsWith(safeRoot + pathSep)) {
+    console.warn(`[/resumes/${id}/file] path-traversal attempt blocked: ${resume.file_path}`);
+    return res.status(400).json({ error: 'Invalid file path.' });
+  }
   if (!existsSync(abs)) return res.status(404).json({ error: 'File missing on disk.' });
 
   res.setHeader('Content-Type', resume.content_type || 'application/octet-stream');
@@ -548,28 +594,6 @@ app.get('/stats', (_req, res) => {
   } catch (err) {
     console.error('[/stats] error:', err);
     res.status(500).json({ error: err.message });
-  }
-});
-
-// Job description -> ranked candidates. Embeds the JD locally, runs vector
-// search across every resume chunk, aggregates per candidate, and (unless
-// reasons=false) makes ONE LLM call to write a 1-line fit reason for each.
-//
-// Body: { jobDescription, topK?, reasons? }
-// Returns: { results: [{ resumeId, candidateName, score, matchScore, reason, bestExcerpt }] }
-app.post('/match', async (req, res) => {
-  const { jobDescription, topK, reasons } = req.body || {};
-  if (!jobDescription || typeof jobDescription !== 'string' || jobDescription.trim().length < 20) {
-    return res.status(400).json({ error: 'jobDescription must be at least 20 characters.' });
-  }
-  try {
-    const k = Number.isFinite(Number(topK)) ? Math.max(1, Math.min(20, Number(topK))) : 5;
-    const fn = reasons === false ? matchJobDescription : matchJobDescriptionWithReasons;
-    const results = await fn(jobDescription, { topK: k });
-    res.json({ count: results.length, results });
-  } catch (err) {
-    console.error('[/match] error:', err);
-    res.status(500).json({ error: err.message || 'Internal error matching JD.' });
   }
 });
 

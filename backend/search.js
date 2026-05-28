@@ -663,6 +663,27 @@ export function getStats() {
     .slice(0, 12)
     .map(([skill, count]) => ({ skill, count }));
 
+  // Top companies — most-common past employers across the pipeline.
+  // Stored as a JSON array per resume; we lower-case for dedupe but keep
+  // a presentable casing for the label.
+  const companyCounts = new Map();
+  const companyLabel  = new Map();
+  for (const r of db.prepare('SELECT companies FROM resumes WHERE companies IS NOT NULL').all()) {
+    let arr = [];
+    try { arr = JSON.parse(r.companies) || []; } catch { /* ignore */ }
+    for (const c of arr) {
+      const raw = String(c).trim();
+      if (!raw) continue;
+      const key = raw.toLowerCase();
+      companyCounts.set(key, (companyCounts.get(key) || 0) + 1);
+      if (!companyLabel.has(key)) companyLabel.set(key, raw);
+    }
+  }
+  const topCompanies = Array.from(companyCounts.entries())
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 8)
+    .map(([key, count]) => ({ company: companyLabel.get(key), count }));
+
   // Years-experience distribution (0, 1-2, 3-5, 6-10, 10+).
   const yearBuckets = [
     { label: '0-1',  min: 0,   max: 1.99 },
@@ -686,6 +707,34 @@ export function getStats() {
     LIMIT 8
   `).all();
 
+  // Education breakdown — bucket each candidate's `highest_education` text
+  // (falling back to the first entry of `education_json`) into PhD,
+  // Master's, Bachelor's, Diploma or Other. Free-form text means we have
+  // to keyword-match instead of joining on a structured level field.
+  const EDU_RULES = [
+    { key: 'phd',       label: "PhD / Doctorate", tests: [/\bph\.?\s?d\b/i, /doctorate/i, /\bdoctor\b/i] },
+    { key: 'masters',   label: "Master's",        tests: [/\bmaster/i, /\bm\.?tech\b/i, /\bm\.?sc\b/i, /\bm\.?s\.?\b/i, /\bm\.?a\.?\b/i, /\bmba\b/i, /post[- ]?graduat/i] },
+    { key: 'bachelors', label: "Bachelor's",      tests: [/\bbachelor/i, /\bb\.?tech\b/i, /\bb\.?sc\b/i, /\bb\.?s\.?\b/i, /\bb\.?a\.?\b/i, /\bb\.?e\.?\b/i, /under[- ]?graduat/i] },
+    { key: 'diploma',   label: 'Diploma',         tests: [/\bdiploma\b/i, /\bassociate\b/i, /\bpolytechnic\b/i] }
+  ];
+  const eduCounts = { phd: 0, masters: 0, bachelors: 0, diploma: 0, other: 0 };
+  for (const row of db.prepare('SELECT highest_education, education_json FROM resumes').all()) {
+    let text = (row.highest_education || '').trim();
+    if (!text) {
+      try {
+        const arr = JSON.parse(row.education_json || '[]');
+        text = (arr[0]?.degree || '').trim();
+      } catch { /* ignore */ }
+    }
+    if (!text) { eduCounts.other++; continue; }
+    const hit = EDU_RULES.find((rule) => rule.tests.some((re) => re.test(text)));
+    eduCounts[hit ? hit.key : 'other']++;
+  }
+  const educationBreakdown = [
+    ...EDU_RULES.map((r) => ({ key: r.key, label: r.label, count: eduCounts[r.key] })),
+    { key: 'other', label: 'Other / Unknown', count: eduCounts.other }
+  ].filter((b) => b.count > 0);
+
   return {
     total,
     avgScore,
@@ -695,7 +744,9 @@ export function getStats() {
     timeline,
     breakdownAvg,
     topSkills,
+    topCompanies,
     yearBuckets: yearBuckets.map(({ label, count }) => ({ label, count })),
+    educationBreakdown,
     recent,
     generatedAt: new Date().toISOString()
   };

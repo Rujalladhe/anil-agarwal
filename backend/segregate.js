@@ -5,8 +5,7 @@
 //   1. Embed the JD once.
 //   2. Vector-search the candidate chunk pool.
 //   3. Aggregate hits per resume into a single composite distance
-//      (70% best chunk + 30% avg of top-3) -- mirrors match.js so the
-//      math feels consistent across the app.
+//      (70% best chunk + 30% avg of top-3).
 //
 // Assignment:
 //   For each resume seen by ANY JD, pick the JD with the smallest
@@ -16,7 +15,8 @@
 //   also land in unmatched with matchScore=0.
 
 import { embedQuery } from './embeddings.js';
-import { searchChunks, listResumes } from './db.js';
+import { listResumes } from './db.js';
+import { searchChunksWithFallback } from './rag.js';
 
 function distanceToScore(d) {
   if (!Number.isFinite(d)) return 0;
@@ -74,7 +74,7 @@ export async function segregateResumes(jds, { threshold = 30, poolPerJd } = {}) 
   // embedding providers rate-limit on bursts; serial keeps it boring.
   for (const jd of valid) {
     const embedding = await embedQuery(jd.text);
-    const hits = searchChunks({ queryEmbedding: embedding, topK: pool, resumeId: null });
+    const hits = await searchChunksWithFallback({ queryEmbedding: embedding, topK: pool, resumeId: null });
     const perResume = aggregatePerResume(hits);
     for (const r of perResume) {
       let arr = byResume.get(r.resumeId);
@@ -134,15 +134,36 @@ export async function segregateResumes(jds, { threshold = 30, poolPerJd } = {}) 
     }
   }
 
+  // Dedupe identical candidate copies across the whole result. If the same
+  // candidate (by name + filename + score + category) appears in multiple
+  // places — e.g. one copy got matched to a JD while a second copy slipped
+  // through the chunk-pool and landed in Unmatched at 0% — keep only the
+  // single best-matched row. Otherwise the UI shows misleading duplicates.
+  const dedupeKey = (c) =>
+    [c.candidateName || '', c.filename || '', c.score ?? '', c.category || ''].join('|');
+  const bestByKey = new Map();
+  const indexAllRows = (rows) => {
+    for (const r of rows) {
+      const k = dedupeKey(r);
+      const prev = bestByKey.get(k);
+      if (!prev || r.matchScore > prev.matchScore) bestByKey.set(k, r);
+    }
+  };
+  buckets.forEach((b) => indexAllRows(b.candidates));
+  indexAllRows(unmatched);
+  const keep = (rows) => rows.filter((r) => bestByKey.get(dedupeKey(r)) === r);
+  buckets.forEach((b) => { b.candidates = keep(b.candidates); });
+  const dedupedUnmatched = keep(unmatched);
+
   for (const b of buckets) {
     b.candidates.sort((a, b) =>
       (b.matchScore - a.matchScore) || ((b.score || 0) - (a.score || 0)));
   }
-  unmatched.sort((a, b) => b.matchScore - a.matchScore);
+  dedupedUnmatched.sort((a, b) => b.matchScore - a.matchScore);
 
   return {
     buckets,
-    unmatched,
+    unmatched: dedupedUnmatched,
     jdCount:      prepared.length,
     validJdCount: valid.length,
     resumeCount:  resumes.length

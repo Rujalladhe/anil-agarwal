@@ -4,6 +4,9 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>InCruiter · Dashboard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap" />
   <link rel="stylesheet" href="dashboard.css" />
   <link rel="stylesheet" href="automation.css" />
   <link rel="preconnect" href="https://cdn.jsdelivr.net" />
@@ -11,57 +14,98 @@
   <script defer type="module" src="dashboard.js"></script>
   <script defer type="module" src="automation.js"></script>
 </head>
-<body>
-  <aside class="sidebar">
-    <div class="brand">
-      <div class="brand-mark">IC</div>
-      <div>
-        <div class="brand-title">InCruiter</div>
-        <div class="brand-sub">by Anil Agarwal</div>
+<body class="not-connected">
+  <header class="appbar">
+    <div class="appbar-left">
+      <div class="brand">
+        <div class="brand-mark">IC</div>
+        <div class="brand-text">
+          <div class="brand-title">InCruiter<sup>®</sup></div>
+          <div class="brand-sub">tech-driven hiring</div>
+        </div>
       </div>
+      <button id="quickCreateBtn" class="quick-create" title="Quick actions">
+        Quick Create <span class="caret">▾</span>
+      </button>
     </div>
 
+    <nav class="appbar-nav">
+      <button class="appnav-btn active" data-view="overview">Dashboard</button>
+      <button class="appnav-btn" data-view="candidates">Candidates</button>
+      <button class="appnav-btn" data-view="segregate">Segregate</button>
+      <button class="appnav-btn" data-view="chat">AI Chat</button>
+      <button class="appnav-btn" data-view="automation">Automation</button>
+      <button class="appnav-btn" data-view="settings">Settings</button>
+    </nav>
+
+    <div class="appbar-right">
+      <button id="refreshBtn" class="icon-btn" title="Refresh data">↻</button>
+      <button id="exportBtn" class="icon-btn" title="Export Excel">⬇</button>
+      <button class="notif-btn" title="Notifications">
+        <span class="bell">🔔</span>
+        <span class="notif-badge">9+</span>
+      </button>
+      <div class="avatar" title="Profile">
+        <span>👤</span>
+        <span class="caret">▾</span>
+      </div>
+    </div>
+  </header>
+
+  <aside class="sidebar">
+    <button class="rail-toggle" aria-label="Collapse menu">›</button>
     <nav class="nav">
-      <button class="nav-btn active" data-view="overview">
-        <span class="ico">●</span>Overview
+      <button id="incConnectBtn" class="nav-btn nav-btn-cta active" type="button" title="Open InCruiter workspace">
+        <span class="ico">◉</span>
+        <span class="nav-label">IncConnect</span>
       </button>
-      <button class="nav-btn" data-view="candidates">
-        <span class="ico">▤</span>Candidates
+      <button class="nav-btn" type="button" tabindex="-1" aria-disabled="true" title="IncServe">
+        <span class="ico">▦</span>
+        <span class="nav-label">IncServe</span>
       </button>
-      <button class="nav-btn" data-view="match">
-        <span class="ico">◇</span>JD Match
+      <button class="nav-btn" type="button" tabindex="-1" aria-disabled="true" title="IncBot">
+        <span class="ico">▤</span>
+        <span class="nav-label">IncBot</span>
       </button>
-      <button class="nav-btn" data-view="segregate">
-        <span class="ico">▥</span>Segregate
+      <button class="nav-btn" type="button" tabindex="-1" aria-disabled="true" title="IncScreen">
+        <span class="ico">◇</span>
+        <span class="nav-label">IncScreen</span>
       </button>
-      <button class="nav-btn" data-view="chat">
-        <span class="ico">◆</span>AI Chat
+      <button class="nav-btn" type="button" tabindex="-1" aria-disabled="true" title="IncVid">
+        <span class="ico">▥</span>
+        <span class="nav-label">IncVid</span>
       </button>
-      <button class="nav-btn" data-view="automation">
-        <span class="ico">⚡</span>Automation
-      </button>
-      <button class="nav-btn" data-view="settings">
-        <span class="ico">⚙</span>Settings
+      <button class="nav-btn" type="button" tabindex="-1" aria-disabled="true" title="IncFeed">
+        <span class="ico">◆</span>
+        <span class="nav-label">IncFeed</span>
       </button>
     </nav>
 
     <div class="side-footer">
-      <div class="health" id="healthBox">
+      <div class="health" id="healthBox" title="Backend health">
         <span class="dot pending"></span>
         <span class="health-text">checking…</span>
       </div>
+      <button class="help-btn" title="Help">?</button>
     </div>
   </aside>
 
   <main class="main">
+    <!-- Landing splash shown until the user clicks IncConnect. Once connected,
+         body.connected hides this block and reveals the appbar + workspace. -->
+    <section id="connectSplash" class="connect-splash">
+      <div class="connect-card">
+        <div class="connect-mark">IC</div>
+        <h2>Welcome to InCruiter</h2>
+        <p>Click <strong>IncConnect</strong> in the sidebar to open your recruitment workspace — dashboard, candidates, segregation, AI chat, automation, and settings.</p>
+        <button id="connectSplashBtn" class="btn primary">Open Workspace</button>
+      </div>
+    </section>
+
     <header class="topbar">
       <div>
-        <h1 id="viewTitle">Overview</h1>
-        <p id="viewSubtitle" class="muted">At-a-glance metrics across every scored resume.</p>
-      </div>
-      <div class="topbar-actions">
-        <button id="refreshBtn" class="btn ghost" title="Reload data">↻ Refresh</button>
-        <button id="exportBtn" class="btn primary" title="Download all candidates as Excel">⬇ Export Excel</button>
+        <h1 id="viewTitle">Dashboard</h1>
+        <p id="viewSubtitle" class="muted">Welcome back! Here's your recruitment overview</p>
       </div>
     </header>
 
@@ -69,22 +113,34 @@
     <section class="view" data-view="overview">
       <div class="kpi-grid">
         <div class="kpi">
-          <div class="kpi-label">Total resumes</div>
+          <div class="kpi-head">
+            <div class="kpi-label">Total Resumes</div>
+            <span class="kpi-ico kpi-ico-blue">▦</span>
+          </div>
           <div class="kpi-value" id="kpiTotal">—</div>
           <div class="kpi-sub" id="kpiTotalSub">across all categories</div>
         </div>
         <div class="kpi">
-          <div class="kpi-label">Average score</div>
+          <div class="kpi-head">
+            <div class="kpi-label">Average Score</div>
+            <span class="kpi-ico kpi-ico-green">↗</span>
+          </div>
           <div class="kpi-value" id="kpiAvg">—</div>
           <div class="kpi-sub" id="kpiAvgSub">out of 100</div>
         </div>
         <div class="kpi">
-          <div class="kpi-label">Top categories</div>
+          <div class="kpi-head">
+            <div class="kpi-label">Top Category</div>
+            <span class="kpi-ico kpi-ico-orange">◇</span>
+          </div>
           <div class="kpi-value" id="kpiCat">—</div>
           <div class="kpi-sub" id="kpiCatSub"></div>
         </div>
         <div class="kpi">
-          <div class="kpi-label">Strong matches</div>
+          <div class="kpi-head">
+            <div class="kpi-label">Strong Matches</div>
+            <span class="kpi-ico kpi-ico-red">★</span>
+          </div>
           <div class="kpi-value" id="kpiGood">—</div>
           <div class="kpi-sub">score ≥ 75</div>
         </div>
@@ -130,13 +186,35 @@
           </div>
           <div class="chart-wrap"><canvas id="chartBreakdown"></canvas></div>
         </div>
+      </div>
 
+      <div class="charts-grid charts-grid-2">
         <div class="card chart-card">
           <div class="card-head">
             <h3>Years of experience</h3>
             <span class="muted small">Seniority spread</span>
           </div>
           <div class="chart-wrap"><canvas id="chartYears"></canvas></div>
+        </div>
+
+        <div class="card chart-card">
+          <div class="card-head">
+            <h3>Top companies</h3>
+            <span class="muted small">Where this talent has worked</span>
+          </div>
+          <div class="chart-wrap"><canvas id="chartCompanies"></canvas></div>
+        </div>
+      </div>
+
+      <div class="card edu-card">
+        <div class="card-head">
+          <h3>Education breakdown</h3>
+          <span class="muted small">Highest qualification across the pipeline</span>
+        </div>
+        <div class="edu-wrap">
+          <div class="edu-chart-wrap"><canvas id="chartEducation"></canvas></div>
+          <div id="eduInsights" class="edu-insights"></div>
+          <ul id="eduLegend" class="edu-legend"></ul>
         </div>
       </div>
 
@@ -161,8 +239,44 @@
     <!-- ===================== CANDIDATES VIEW ===================== -->
     <section class="view hidden" data-view="candidates">
       <div class="card">
-        <div class="filters">
-          <input id="searchInput" type="search" placeholder="Search name, skill, role, company…" />
+        <div class="cand-toolbar">
+          <div class="cand-search-wrap">
+            <input id="searchInput" type="search" placeholder="Search here..." />
+            <svg class="cand-search-ico" width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <circle cx="7" cy="7" r="5" stroke="currentColor" stroke-width="1.4"/>
+              <path d="M10.8 10.8L14 14" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
+            </svg>
+          </div>
+          <div class="cand-toolbar-actions">
+            <button id="candRefreshBtn" class="cand-tool-btn icon-only" title="Refresh" aria-label="Refresh">
+              <svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                <g clip-path="url(#clip0_1_2109)">
+                  <rect x="0.6" y="0.6" width="34.8" height="34.8" rx="4.2" stroke="#12B6BC" stroke-width="1.2"/>
+                  <path d="M18.0001 7.2C15.1358 7.2 12.3887 8.33785 10.3633 10.3632C8.33795 12.3886 7.2001 15.1357 7.2001 18H3.6001L8.2681 22.668L8.3521 22.836L13.2001 18H9.6001C9.6001 13.356 13.3561 9.6 18.0001 9.6C22.6441 9.6 26.4001 13.356 26.4001 18C26.4001 22.644 22.6441 26.4 18.0001 26.4C15.6841 26.4 13.5841 25.452 12.0721 23.928L10.3681 25.632C11.3682 26.6376 12.5575 27.4353 13.8674 27.979C15.1773 28.5227 16.5818 28.8018 18.0001 28.8C20.8644 28.8 23.6115 27.6621 25.6369 25.6367C27.6622 23.6114 28.8001 20.8643 28.8001 18C28.8001 15.1357 27.6622 12.3886 25.6369 10.3632C23.6115 8.33785 20.8644 7.2 18.0001 7.2Z" fill="#12B6BC"/>
+                  <path d="M11.7886 25.3199C13.4558 26.7345 15.5558 27.5376 17.7414 27.5965C19.9271 27.6554 22.0673 26.9664 23.8081 25.6436C25.549 24.3207 26.7861 22.4433 27.3149 20.3218C27.8437 18.2003 27.6325 15.9618 26.7162 13.9767C25.7998 11.9916 24.2333 10.3787 22.2758 9.40485C20.3182 8.43101 18.0869 8.15456 15.9509 8.62123C13.8148 9.0879 11.9021 10.2697 10.529 11.9712C9.15595 13.6727 8.40483 15.7919 8.3999 17.9783" stroke="#12B6BC" stroke-width="2.4"/>
+                </g>
+                <defs>
+                  <clipPath id="clip0_1_2109"><rect width="36" height="36" fill="white"/></clipPath>
+                </defs>
+              </svg>
+            </button>
+            <button id="candFiltersBtn" class="cand-tool-btn" title="Show filters">
+              <svg width="18" height="18" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                <path d="M1.5 3h13l-5 6v4l-3 1.5V9l-5-6z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" fill="none"/>
+              </svg>
+              Filters
+            </button>
+            <button id="candExportBtn" class="cand-tool-btn" title="Export to Excel">
+              <svg width="18" height="18" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                <path d="M14 10V12.6667C14 13.0203 13.8595 13.3594 13.6095 13.6095C13.3594 13.8595 13.0203 14 12.6667 14H3.33333C2.97971 14 2.64057 13.8595 2.39052 13.6095C2.14048 13.3594 2 13.0203 2 12.6667V10" stroke="currentColor" stroke-width="1.33333" stroke-linecap="round" stroke-linejoin="round"/>
+                <path d="M4.66675 6.66667L8.00008 10L11.3334 6.66667" stroke="currentColor" stroke-width="1.33333" stroke-linecap="round" stroke-linejoin="round"/>
+                <path d="M8 10V2" stroke="currentColor" stroke-width="1.33333" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+              Export
+            </button>
+          </div>
+        </div>
+        <div id="candFiltersPanel" class="cand-filters-panel hidden">
           <select id="categoryFilter">
             <option value="">All categories</option>
           </select>
@@ -181,65 +295,28 @@
             <option value="5">5+ years</option>
             <option value="8">8+ years</option>
           </select>
-          <button id="applyFiltersBtn" class="btn primary">Apply</button>
-          <button id="clearFiltersBtn" class="btn ghost">Clear</button>
+          <button id="applyFiltersBtn" class="btn primary small">Apply</button>
+          <button id="clearFiltersBtn" class="btn ghost small">Clear</button>
         </div>
         <div id="candidatesStatus" class="muted small candidates-status"></div>
-        <div class="table-wrap">
-          <table class="candidates-table">
-            <thead>
-              <tr>
-                <th>#</th>
-                <th>Candidate</th>
-                <th>Role / Title</th>
-                <th>Category</th>
-                <th>Yrs</th>
-                <th>Skills</th>
-                <th>Score</th>
-                <th>Actions</th>
-              </tr>
-            </thead>
-            <tbody id="candidatesBody"></tbody>
-          </table>
+        <div class="cand-table-frame">
+          <div class="table-wrap">
+            <table class="candidates-table">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>Candidate</th>
+                  <th>Contact Details</th>
+                  <th>Last Updated <span class="sort-ico">↑↓</span></th>
+                  <th>Resume Score</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody id="candidatesBody"></tbody>
+            </table>
+          </div>
         </div>
       </div>
-    </section>
-
-    <!-- ===================== JD MATCH VIEW ===================== -->
-    <section class="view hidden" data-view="match">
-      <div class="card match-card">
-        <div class="card-head">
-          <h3>Paste a job description</h3>
-          <span class="muted small">We'll rank your candidates by semantic fit and explain each one.</span>
-        </div>
-        <textarea
-          id="jdInput"
-          class="jd-input"
-          rows="9"
-          placeholder="e.g. Senior Backend Engineer — 4+ years building Node.js / TypeScript services on AWS. Strong SQL, Postgres, GraphQL. Bonus: experience with event-driven architectures, Kubernetes, or LLM-powered products."
-        ></textarea>
-        <div class="match-controls">
-          <label class="match-control">
-            Top
-            <select id="jdTopK">
-              <option value="3">3</option>
-              <option value="5" selected>5</option>
-              <option value="10">10</option>
-            </select>
-            candidates
-          </label>
-          <label class="match-control">
-            <input id="jdReasons" type="checkbox" checked />
-            Generate AI reasons
-          </label>
-          <span class="muted small" style="flex:1;"></span>
-          <button id="jdClearBtn" class="btn ghost">Clear</button>
-          <button id="jdRunBtn" class="btn primary">Find matches</button>
-        </div>
-      </div>
-
-      <div id="jdStatus" class="muted small jd-status"></div>
-      <div id="jdResults" class="jd-results"></div>
     </section>
 
     <!-- ===================== SEGREGATE VIEW ===================== -->

@@ -10,8 +10,12 @@
 // dimensions change, drop the chunk_vectors table (or delete data.db) and
 // re-index every resume.
 
+// Google retired `text-embedding-004` -- the current stable embedder is
+// `gemini-embedding-001`. Its native output is 3072 dims (Matryoshka), and
+// we pass outputDimensionality below to truncate to 768 for compatibility
+// with the existing Pinecone/sqlite-vec schemas.
 const PROVIDER_DEFAULTS = {
-  google: { model: 'text-embedding-004',         dim: 768 },
+  google: { model: 'gemini-embedding-001',       dim: 768 },
   voyage: { model: 'voyage-3-lite',              dim: 512 },
   local:  { model: 'Xenova/all-MiniLM-L6-v2',    dim: 384 }
 };
@@ -57,7 +61,7 @@ async function embedGoogleBatch(texts) {
   if (!key) {
     throw new Error('GEMINI_API_KEY is not set in backend/.env (required for EMBED_PROVIDER=google).');
   }
-  const { model } = getEmbedConfig();
+  const { model, dim } = getEmbedConfig();
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:batchEmbedContents?key=${encodeURIComponent(key)}`;
 
   const out = [];
@@ -67,14 +71,30 @@ async function embedGoogleBatch(texts) {
     const body = {
       requests: slice.map((t) => ({
         model: `models/${model}`,
-        content: { parts: [{ text: t }] }
+        content: { parts: [{ text: t }] },
+        // gemini-embedding-001 natively outputs 3072 dims; outputDimensionality
+        // applies Matryoshka truncation to the configured dim. Required for
+        // the response to match EMBED_DIM (and therefore the sqlite-vec /
+        // Pinecone schemas).
+        outputDimensionality: dim
       }))
     };
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body)
-    });
+    // Retry on 429 (rate limit) with exponential backoff. Free-tier
+    // gemini-embedding-001 is tight (5 RPM), so a single batched
+    // re-index burst will hit this and need to back off. After 5 tries
+    // (~31s of waits) we surface the error so the caller doesn't hang.
+    let res;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+      if (res.status !== 429) break;
+      const waitMs = 1000 * Math.pow(2, attempt); // 1s, 2s, 4s, 8s, 16s
+      console.warn(`[embeddings] Google rate-limited (429), retrying in ${waitMs}ms (attempt ${attempt + 1}/5)...`);
+      await new Promise((r) => setTimeout(r, waitMs));
+    }
     if (!res.ok) {
       const errBody = await res.text();
       throw new Error(`Google embeddings ${res.status}: ${errBody}`);

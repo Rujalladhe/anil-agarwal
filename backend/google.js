@@ -475,11 +475,15 @@ export async function listGmailResumeEmails({ topMessages = 75 } = {}) {
 
   // 1. Page the inbox for messages with attachments. Gmail's `has:attachment`
   //    operator is the equivalent of Microsoft's `hasAttachments eq true`.
-  //    `-in:chats` keeps Hangouts cruft out.
+  //    `in:inbox` restricts to RECEIVED mail: a resume the user *sends* from
+  //    Gmail sits in Sent, and without this scope it would be ingested and
+  //    tagged source:'gmail' even though it actually landed in another inbox.
+  //    The source tag must mean "the inbox that received this resume," so we
+  //    only read the inbox. `-in:chats` keeps Hangouts cruft out.
   const listUrl =
     `https://gmail.googleapis.com/gmail/v1/users/me/messages` +
     `?maxResults=${Math.max(1, Math.min(100, topMessages))}` +
-    `&q=${encodeURIComponent('has:attachment -in:chats')}`;
+    `&q=${encodeURIComponent('in:inbox has:attachment -in:chats')}`;
   const list = await fetchJson(listUrl, token);
   const ids = (list.messages || []).map((m) => m.id);
   if (!ids.length) return [];

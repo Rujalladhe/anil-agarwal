@@ -1,0 +1,811 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Resume Scorer — Technical Documentation</title>
+<style>
+  :root{
+    --ink:#0f172a;          /* slate-900 */
+    --ink-soft:#334155;     /* slate-700 */
+    --muted:#64748b;        /* slate-500 */
+    --line:#e2e8f0;         /* slate-200 */
+    --line-soft:#eef2f7;
+    --bg-soft:#f8fafc;      /* slate-50  */
+    --brand:#2563eb;        /* blue-600  */
+    --brand-d:#1d4ed8;
+    --brand-l:#dbeafe;
+    --teal:#0d9488;
+    --teal-l:#ccfbf1;
+    --amber:#b45309;
+    --amber-l:#fef3c7;
+    --rose:#be123c;
+    --rose-l:#ffe4e6;
+    --green:#15803d;
+    --green-l:#dcfce7;
+    --violet:#6d28d9;
+    --violet-l:#ede9fe;
+  }
+
+  *{ box-sizing:border-box; }
+
+  @page{
+    size: A4;
+    margin: 18mm 16mm 20mm 16mm;
+  }
+
+  html,body{ margin:0; padding:0; }
+
+  body{
+    font-family:"Segoe UI", -apple-system, Roboto, "Helvetica Neue", Arial, sans-serif;
+    color:var(--ink);
+    font-size:10.5pt;
+    line-height:1.55;
+    -webkit-print-color-adjust:exact;
+    print-color-adjust:exact;
+  }
+
+  h1,h2,h3,h4{ color:var(--ink); line-height:1.25; font-weight:700; }
+  h2{ font-size:18pt; margin:0 0 4px; letter-spacing:-.2px; }
+  h3{ font-size:13pt; margin:22px 0 8px; color:var(--brand-d); }
+  h4{ font-size:11pt; margin:16px 0 6px; color:var(--ink-soft); }
+  p{ margin:0 0 9px; }
+  ul,ol{ margin:0 0 10px; padding-left:20px; }
+  li{ margin:3px 0; }
+  strong{ color:var(--ink); }
+  code{
+    font-family:"Cascadia Code","Consolas",monospace;
+    font-size:9pt; background:var(--line-soft);
+    padding:1px 5px; border-radius:4px; color:#0b3d91;
+    border:1px solid var(--line);
+  }
+  a{ color:var(--brand-d); text-decoration:none; }
+
+  /* ---------- page-break helpers ---------- */
+  .section{ page-break-before: always; }
+  .no-break{ page-break-inside: avoid; }
+
+  /* ---------- COVER ---------- */
+  .cover{
+    height: 257mm;
+    display:flex; flex-direction:column;
+    position:relative;
+    background:
+      radial-gradient(1200px 500px at 80% -10%, #1e3a8a 0%, transparent 60%),
+      linear-gradient(160deg,#0b1220 0%, #111c33 45%, #0b1220 100%);
+    color:#fff; border-radius:14px; overflow:hidden;
+    padding:34px 38px;
+  }
+  .cover .grid-deco{
+    position:absolute; inset:0;
+    background-image:linear-gradient(rgba(255,255,255,.05) 1px,transparent 1px),
+                     linear-gradient(90deg,rgba(255,255,255,.05) 1px,transparent 1px);
+    background-size:26px 26px; opacity:.5;
+  }
+  .cover .badge{
+    position:relative; display:inline-flex; align-items:center; gap:8px;
+    background:rgba(59,130,246,.18); border:1px solid rgba(96,165,250,.5);
+    color:#bfdbfe; font-size:9.5pt; font-weight:600; letter-spacing:.5px;
+    padding:6px 14px; border-radius:999px; text-transform:uppercase;
+  }
+  .cover .dot{ width:8px;height:8px;border-radius:50%; background:#38bdf8; box-shadow:0 0 10px #38bdf8; }
+  .cover .spacer{ flex:1; }
+  .cover h1{
+    position:relative; color:#fff; font-size:46pt; font-weight:800;
+    letter-spacing:-1.5px; margin:0 0 6px; line-height:1.02;
+  }
+  .cover .accent{ color:#60a5fa; }
+  .cover .tagline{
+    position:relative; font-size:15pt; color:#cbd5e1; font-weight:500;
+    max-width:520px; margin-bottom:26px;
+  }
+  .cover .pills{ position:relative; display:flex; flex-wrap:wrap; gap:8px; margin-bottom:8px;}
+  .cover .pill{
+    background:rgba(255,255,255,.07); border:1px solid rgba(255,255,255,.16);
+    color:#e2e8f0; font-size:9pt; padding:5px 11px; border-radius:8px; font-weight:500;
+  }
+  .cover .doctype{
+    position:relative; font-size:11pt; color:#93c5fd; font-weight:600;
+    letter-spacing:3px; text-transform:uppercase; margin-bottom:6px;
+  }
+  .cover .meta{
+    position:relative; display:flex; gap:34px; margin-top:24px;
+    border-top:1px solid rgba(255,255,255,.14); padding-top:18px;
+  }
+  .cover .meta .k{ font-size:8pt; text-transform:uppercase; letter-spacing:1px; color:#7c93b3; margin-bottom:3px; }
+  .cover .meta .v{ font-size:11pt; color:#f1f5f9; font-weight:600; }
+
+  /* ---------- generic blocks ---------- */
+  .lead{ font-size:11.5pt; color:var(--ink-soft); }
+  .eyebrow{
+    display:inline-block; font-size:8.5pt; font-weight:700; letter-spacing:1.5px;
+    text-transform:uppercase; color:var(--brand); background:var(--brand-l);
+    padding:4px 10px; border-radius:6px; margin-bottom:10px;
+  }
+  .rule{ height:3px; width:54px; background:var(--brand); border-radius:3px; margin:6px 0 18px; }
+
+  .callout{
+    border:1px solid var(--line); border-left:4px solid var(--brand);
+    background:var(--bg-soft); border-radius:8px; padding:12px 16px; margin:14px 0;
+  }
+  .callout.warn{ border-left-color:var(--amber); background:#fffbeb; }
+  .callout.ok{ border-left-color:var(--green); background:#f0fdf4; }
+  .callout .ttl{ font-weight:700; font-size:9.5pt; text-transform:uppercase; letter-spacing:.5px; margin-bottom:4px; color:var(--ink-soft); }
+
+  /* ---------- tables ---------- */
+  table{ width:100%; border-collapse:collapse; margin:12px 0; font-size:9.5pt; }
+  th{
+    background:var(--ink); color:#fff; text-align:left; font-weight:600;
+    padding:8px 10px; font-size:8.5pt; text-transform:uppercase; letter-spacing:.4px;
+  }
+  td{ padding:7px 10px; border-bottom:1px solid var(--line); vertical-align:top; }
+  tr:nth-child(even) td{ background:var(--bg-soft); }
+  table.lined th:first-child{ border-top-left-radius:8px; }
+  table.lined th:last-child{ border-top-right-radius:8px; }
+
+  .tag{ display:inline-block; font-size:8pt; font-weight:700; padding:2px 8px; border-radius:999px; white-space:nowrap; }
+  .t-get{ background:var(--green-l); color:var(--green); }
+  .t-post{ background:var(--brand-l); color:var(--brand-d); }
+  .t-put{ background:var(--amber-l); color:var(--amber); }
+  .t-del{ background:var(--rose-l); color:var(--rose); }
+  .t-core{ background:var(--violet-l); color:var(--violet); }
+
+  /* ---------- cards ---------- */
+  .cards{ display:grid; grid-template-columns:1fr 1fr; gap:12px; margin:14px 0; }
+  .card{
+    border:1px solid var(--line); border-radius:10px; padding:14px 16px;
+    background:#fff; page-break-inside:avoid;
+  }
+  .card .ic{
+    width:30px;height:30px;border-radius:8px; display:flex;align-items:center;justify-content:center;
+    font-size:14pt; margin-bottom:8px; background:var(--brand-l);
+  }
+  .card h4{ margin:0 0 4px; color:var(--ink); }
+  .card p{ margin:0; font-size:9pt; color:var(--muted); }
+
+  /* ---------- TOC ---------- */
+  .toc{ margin-top:10px; }
+  .toc .row{ display:flex; align-items:baseline; gap:10px; padding:7px 0; border-bottom:1px solid var(--line-soft); }
+  .toc .num{ color:var(--brand); font-weight:700; width:26px; }
+  .toc .ttl{ font-weight:600; color:var(--ink); }
+  .toc .sub{ color:var(--muted); font-weight:400; font-size:9.5pt; margin-left:6px; }
+
+  /* ---------- KPI strip ---------- */
+  .kpis{ display:grid; grid-template-columns:repeat(4,1fr); gap:10px; margin:16px 0; }
+  .kpi{ border:1px solid var(--line); border-radius:10px; padding:12px; text-align:center; background:var(--bg-soft); }
+  .kpi .n{ font-size:18pt; font-weight:800; color:var(--brand-d); line-height:1; }
+  .kpi .l{ font-size:8pt; color:var(--muted); text-transform:uppercase; letter-spacing:.5px; margin-top:5px; }
+
+  /* ---------- pipeline / steps ---------- */
+  .steps{ counter-reset:step; margin:14px 0; }
+  .step{ display:flex; gap:14px; padding:10px 0; border-bottom:1px dashed var(--line); page-break-inside:avoid; }
+  .step:last-child{ border-bottom:none; }
+  .step .idx{
+    counter-increment:step; flex:none; width:28px;height:28px;border-radius:8px;
+    background:var(--brand); color:#fff; font-weight:700; display:flex;align-items:center;justify-content:center; font-size:11pt;
+  }
+  .step .idx::before{ content:counter(step); }
+  .step .b h4{ margin:2px 0 3px; }
+  .step .b p{ margin:0; font-size:9.5pt; color:var(--ink-soft); }
+
+  .small{ font-size:8.5pt; color:var(--muted); }
+  .mono{ font-family:"Cascadia Code","Consolas",monospace; }
+
+  figure{ margin:16px 0; page-break-inside:avoid; }
+  figcaption{ font-size:8.5pt; color:var(--muted); text-align:center; margin-top:6px; }
+
+  .footer-note{
+    margin-top:26px; padding-top:12px; border-top:1px solid var(--line);
+    font-size:8.5pt; color:var(--muted); display:flex; justify-content:space-between;
+  }
+  .twocol{ column-count:2; column-gap:26px; }
+  .twocol li{ break-inside:avoid; }
+  .legend{ display:flex; gap:16px; flex-wrap:wrap; font-size:8.5pt; color:var(--muted); margin-top:8px; }
+  .legend span{ display:inline-flex; align-items:center; gap:6px; }
+  .sw{ width:11px;height:11px;border-radius:3px; display:inline-block; }
+</style>
+</head>
+<body>
+
+<!-- ============================= COVER ============================= -->
+<div class="cover">
+  <div class="grid-deco"></div>
+  <span class="badge"><span class="dot"></span> Manifest V3 · Local-First · AI-Powered</span>
+  <div class="spacer"></div>
+  <div class="doctype">Technical Documentation</div>
+  <h1>Resume <span class="accent">Scorer</span></h1>
+  <div class="tagline">AI-powered resume screening &amp; recruitment automation — from inbox to interview, end to end.</div>
+  <div class="pills">
+    <span class="pill">Chrome Extension</span>
+    <span class="pill">Node · Express Backend</span>
+    <span class="pill">Groq / Anthropic / Gemini</span>
+    <span class="pill">Local Embeddings + RAG</span>
+    <span class="pill">SQLite · sqlite-vec · Pinecone</span>
+    <span class="pill">Google Calendar / Meet / Gmail</span>
+  </div>
+  <div class="meta">
+    <div><div class="k">Version</div><div class="v">0.2.0</div></div>
+    <div><div class="k">Date</div><div class="v">29 May 2026</div></div>
+    <div><div class="k">Status</div><div class="v">MVP — Active</div></div>
+    <div><div class="k">Classification</div><div class="v">Internal</div></div>
+  </div>
+</div>
+
+<!-- ============================= TOC ============================= -->
+<div class="section">
+  <span class="eyebrow">Contents</span>
+  <h2>Table of Contents</h2>
+  <div class="rule"></div>
+  <div class="toc">
+    <div class="row"><span class="num">1</span><span class="ttl">Executive Summary</span><span class="sub">— what the product is &amp; why</span></div>
+    <div class="row"><span class="num">2</span><span class="ttl">Project Scope</span><span class="sub">— in-scope, out-of-scope, assumptions &amp; constraints</span></div>
+    <div class="row"><span class="num">3</span><span class="ttl">Use Cases</span><span class="sub">— actors, use-case catalogue &amp; key scenarios</span></div>
+    <div class="row"><span class="num">4</span><span class="ttl">System Design &amp; Architecture</span><span class="sub">— tiers, components &amp; data flows</span></div>
+    <div class="row"><span class="num">5</span><span class="ttl">Data Model</span><span class="sub">— database schema &amp; storage strategy</span></div>
+    <div class="row"><span class="num">6</span><span class="ttl">API Reference</span><span class="sub">— backend HTTP endpoints</span></div>
+    <div class="row"><span class="num">7</span><span class="ttl">Technology Stack</span><span class="sub">— every layer, library &amp; why</span></div>
+    <div class="row"><span class="num">8</span><span class="ttl">Security &amp; Privacy</span><span class="sub">— the rules baked into the design</span></div>
+    <div class="row"><span class="num">9</span><span class="ttl">Setup &amp; Deployment</span><span class="sub">— how to run it end to end</span></div>
+    <div class="row"><span class="num">10</span><span class="ttl">Appendix</span><span class="sub">— glossary &amp; references</span></div>
+  </div>
+
+  <div class="footer-note">
+    <span>Resume Scorer — Technical Documentation</span>
+    <span>v0.2.0 · Confidential / Internal</span>
+  </div>
+</div>
+
+<!-- ============================= 1. EXEC SUMMARY ============================= -->
+<div class="section">
+  <span class="eyebrow">Section 1</span>
+  <h2>Executive Summary</h2>
+  <div class="rule"></div>
+
+  <p class="lead">Resume Scorer is a local-first recruitment assistant that turns a recruiter's
+  email inbox into a scored, searchable, and actionable candidate pipeline. It pairs a
+  <strong>Chrome (Manifest V3) extension</strong> with a small <strong>Node.js / Express backend</strong>
+  so that resumes flowing into Outlook or Gmail are automatically extracted, scored by a large
+  language model, indexed for semantic search, and pushed through configurable hiring automations —
+  all without sending an API key to the browser.</p>
+
+  <div class="kpis">
+    <div class="kpi"><div class="n">2</div><div class="l">Inboxes (Outlook + Gmail)</div></div>
+    <div class="kpi"><div class="n">3</div><div class="l">AI providers, swappable</div></div>
+    <div class="kpi"><div class="n">6</div><div class="l">Dashboard analytics charts</div></div>
+    <div class="kpi"><div class="n">0</div><div class="l">API keys in the browser</div></div>
+  </div>
+
+  <h3>The problem it solves</h3>
+  <p>Recruiters receive resumes as email attachments and triage them by hand: open the PDF, skim it,
+  guess a fit, copy details into a sheet, then chase scheduling over more email. Resume Scorer collapses
+  that loop. The moment a resume lands, it is parsed, scored 0–100 with a category breakdown, enriched
+  with structured candidate fields, made searchable in plain English, and — where the recruiter opts in —
+  routed into automations that send assessment links, book interviews with live Google Meet links, or send
+  a polite rejection.</p>
+
+  <h3>What makes it different</h3>
+  <div class="cards">
+    <div class="card"><div class="ic">🔒</div><h4>Key-safe by design</h4><p>Every AI call is brokered by the local backend. The extension never holds a provider key, and OAuth uses PKCE with no client secret.</p></div>
+    <div class="card"><div class="ic">💸</div><h4>Cheap to run</h4><p>Local embeddings (Transformers.js), score caching, and a regex-first query parser keep token spend near zero on the free tier.</p></div>
+    <div class="card"><div class="ic">🔎</div><h4>Semantic search + RAG chat</h4><p>"Show me backend devs with 3+ years" is answered by a SQL filter and a vector index, then narrated by the LLM.</p></div>
+    <div class="card"><div class="ic">⚙️</div><h4>Visual automation</h4><p>An N8N-style canvas wires triggers → filters → actions: send OA, schedule interviews, reject — with a full dry-run mode.</p></div>
+  </div>
+</div>
+
+<!-- ============================= 2. SCOPE ============================= -->
+<div class="section">
+  <span class="eyebrow">Section 2</span>
+  <h2>Project Scope</h2>
+  <div class="rule"></div>
+  <p class="lead">This section draws the boundary of the MVP: what the system does, what it deliberately
+  does not, and the assumptions the design rests on.</p>
+
+  <h3>2.1 In scope</h3>
+  <table class="lined">
+    <thead><tr><th style="width:30%">Capability</th><th>Description</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Inbox connection</strong></td><td>OAuth login to Microsoft Outlook (Graph API) and Google Gmail, with automatic token refresh.</td></tr>
+      <tr><td><strong>Attachment discovery</strong></td><td>List recent emails that carry <code>.pdf</code> / <code>.docx</code> attachments; ignore inline images &amp; signatures.</td></tr>
+      <tr><td><strong>Text extraction</strong></td><td>Server-side parsing of PDF (<code>pdf-parse</code>) and DOCX (<code>mammoth</code>) into raw text.</td></tr>
+      <tr><td><strong>AI scoring</strong></td><td>0–100 overall score plus a 5-axis breakdown (experience, skills, education, clarity, impact), summary, strengths, concerns, recommendations.</td></tr>
+      <tr><td><strong>Candidate enrichment</strong></td><td>Structured extraction of name, contact, current role/company, years of experience, education, skills, locations, remote history, certifications &amp; more.</td></tr>
+      <tr><td><strong>Classification</strong></td><td>Auto-categorisation into role categories and a role title for each candidate.</td></tr>
+      <tr><td><strong>Semantic search &amp; RAG</strong></td><td>Local embeddings indexed in sqlite-vec (and optionally Pinecone) with FTS5 keyword search for hybrid retrieval.</td></tr>
+      <tr><td><strong>AI chat</strong></td><td>Cross-resume mode ("find me…") and single-candidate mode ("tell me about this person"), with a regex pre-parser to save tokens.</td></tr>
+      <tr><td><strong>Recruiter dashboard</strong></td><td>Web UI at <code>localhost:8787</code> — KPIs, six charts, searchable candidate table, drag-drop upload, per-candidate modal.</td></tr>
+      <tr><td><strong>Excel export</strong></td><td>One-click <code>.xlsx</code> export of candidates with scores &amp; summaries (<code>exceljs</code>).</td></tr>
+      <tr><td><strong>Automation builder</strong></td><td>Visual canvas: triggers, filters, branch/top-N logic, and actions (send OA, schedule interview, reject, notify, log) with dry-run.</td></tr>
+      <tr><td><strong>Interview scheduling</strong></td><td>Finds the first free slot across selected interviewers' Google Calendars and books an event with a fresh Google Meet link.</td></tr>
+    </tbody>
+  </table>
+
+  <h3>2.2 Out of scope (for this MVP)</h3>
+  <ul class="twocol">
+    <li><strong>OCR of scanned / image-only PDFs</strong> — only text-bearing documents are parsed.</li>
+    <li><strong>Multi-user accounts, roles &amp; permissions</strong> — single local operator.</li>
+    <li><strong>Cloud / multi-tenant hosting</strong> — backend runs on <code>localhost</code>.</li>
+    <li><strong>Production hardening</strong> — rate limiting, audit logs, secrets vaulting beyond <code>.env</code>.</li>
+    <li><strong>Deep ATS / HRIS integrations</strong> beyond Gmail / Calendar actions.</li>
+    <li><strong>Scheduled / webhook triggers</strong> — the only automation trigger is "Manual run".</li>
+    <li><strong>Mobile or non-Chromium browsers</strong> — targets Chrome / Edge (Chromium).</li>
+    <li><strong>Bias auditing &amp; compliance certification</strong> of the AI scoring model.</li>
+  </ul>
+
+  <h3>2.3 Assumptions &amp; constraints</h3>
+  <div class="callout">
+    <div class="ttl">Operating assumptions</div>
+    <ul style="margin-bottom:0">
+      <li>The operator runs the backend locally and keeps it running while using the extension.</li>
+      <li>The operator can complete a one-time Azure (Microsoft) and Google Cloud OAuth app registration.</li>
+      <li>An AI provider key (Groq is free) is available and placed in <code>backend/.env</code>.</li>
+      <li>Resumes arrive as machine-readable PDF/DOCX files in the connected inbox.</li>
+    </ul>
+  </div>
+  <div class="callout warn">
+    <div class="ttl">Hard constraints (architectural rules)</div>
+    <ul style="margin-bottom:0">
+      <li><strong>No API key may ever live in the extension</strong> — all model calls go through the backend.</li>
+      <li><strong>Manifest V3 only</strong> — background logic is a service worker, not a persistent page.</li>
+      <li><strong>OAuth is PKCE with a public client</strong> — no client secret is stored anywhere in the extension.</li>
+      <li><strong>Text extraction &amp; AI calls happen in the backend</strong>, never in the browser.</li>
+      <li><strong>Secrets stay out of git</strong> — <code>.env</code>, token caches and <code>node_modules</code> are git-ignored.</li>
+    </ul>
+  </div>
+</div>
+
+<!-- ============================= 3. USE CASES ============================= -->
+<div class="section">
+  <span class="eyebrow">Section 3</span>
+  <h2>Use Cases</h2>
+  <div class="rule"></div>
+
+  <h3>3.1 Actors</h3>
+  <table class="lined">
+    <thead><tr><th style="width:24%">Actor</th><th>Role in the system</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Recruiter / Operator</strong></td><td>Primary human user. Connects inboxes, reviews scores, searches, chats, and runs automations.</td></tr>
+      <tr><td><strong>Candidate</strong></td><td>External party whose resume is scored and who receives OA links, interview invites or rejections.</td></tr>
+      <tr><td><strong>Interviewer / Panel</strong></td><td>Internal staff whose calendar availability drives interview scheduling.</td></tr>
+      <tr><td><strong>AI Provider</strong></td><td>External LLM (Groq / Anthropic / Gemini) that scores, enriches and narrates.</td></tr>
+      <tr><td><strong>Identity Providers</strong></td><td>Microsoft Identity &amp; Google OAuth — authenticate inbox / calendar access.</td></tr>
+    </tbody>
+  </table>
+
+  <h3>3.2 Use-case catalogue</h3>
+  <table class="lined">
+    <thead><tr><th style="width:8%">ID</th><th style="width:30%">Use case</th><th>Outcome</th></tr></thead>
+    <tbody>
+      <tr><td><strong>UC-1</strong></td><td>Connect an inbox</td><td>Recruiter signs into Outlook and/or Gmail via OAuth; tokens stored &amp; auto-refreshed.</td></tr>
+      <tr><td><strong>UC-2</strong></td><td>Score a single resume</td><td>Pick an email attachment → backend extracts text → LLM returns score + review rendered in popup.</td></tr>
+      <tr><td><strong>UC-3</strong></td><td>Bulk upload &amp; score</td><td>Drag-drop one or many PDFs/DOCX into the dashboard; each is scored, enriched &amp; indexed.</td></tr>
+      <tr><td><strong>UC-4</strong></td><td>Browse the pipeline</td><td>Overview KPIs + six charts; searchable candidate table with per-candidate detail modal.</td></tr>
+      <tr><td><strong>UC-5</strong></td><td>Semantic / filtered search</td><td>Plain-English queries ("backend devs, 3+ yrs, remote") resolved by SQL filter + vector search.</td></tr>
+      <tr><td><strong>UC-6</strong></td><td>AI chat about candidates</td><td>Ask across all resumes or about one candidate; grounded answers via RAG.</td></tr>
+      <tr><td><strong>UC-7</strong></td><td>Export shortlist</td><td>Download an <code>.xlsx</code> of candidates with scores &amp; AI summaries.</td></tr>
+      <tr><td><strong>UC-8</strong></td><td>Build &amp; run an automation</td><td>Wire trigger → filter → actions; preview with dry-run; execute &amp; review run history.</td></tr>
+      <tr><td><strong>UC-9</strong></td><td>Schedule an interview</td><td>For qualifying candidates, find a free panel slot &amp; book a Calendar event with a Meet link.</td></tr>
+      <tr><td><strong>UC-10</strong></td><td>Send OA link / rejection</td><td>Templated Gmail send with <code>{{placeholders}}</code>; warm / direct / encouraging tones.</td></tr>
+    </tbody>
+  </table>
+
+  <h3>3.3 Key scenario — Score a resume (UC-2)</h3>
+  <div class="steps">
+    <div class="step"><div class="idx"></div><div class="b"><h4>Recruiter opens the extension &amp; selects an email</h4><p>The side-panel popup lists recent messages that carry PDF/DOCX attachments, fetched via Microsoft Graph / Gmail API using the stored access token.</p></div></div>
+    <div class="step"><div class="idx"></div><div class="b"><h4>Extension downloads the raw attachment</h4><p>The attachment is fetched as base64 (<code>contentBytes</code>) — no parsing happens in the browser.</p></div></div>
+    <div class="step"><div class="idx"></div><div class="b"><h4>Extension POSTs to the local backend</h4><p><code>POST /score { filename, contentType, contentBase64 }</code> is sent to <code>http://localhost:8787</code>.</p></div></div>
+    <div class="step"><div class="idx"></div><div class="b"><h4>Backend extracts text &amp; calls the LLM</h4><p><code>extract.js</code> decodes &amp; parses the document; <code>ai.js</code> sends a strict-JSON prompt to the configured provider.</p></div></div>
+    <div class="step"><div class="idx"></div><div class="b"><h4>Backend persists, indexes &amp; returns the result</h4><p>The score, review &amp; enriched fields are written to SQLite; chunks are embedded into the vector index; JSON is returned to the popup and rendered as a score + breakdown chart.</p></div></div>
+  </div>
+
+  <div class="callout ok">
+    <div class="ttl">Edge cases the design handles</div>
+    <ul style="margin-bottom:0">
+      <li><strong>Duplicate scoring</strong> — a unique <code>(email_id, attachment_id)</code> index makes re-scoring the same attachment a no-op.</li>
+      <li><strong>Scanned PDFs</strong> — if too little text is extracted, the UI fails loudly ("could not extract enough text").</li>
+      <li><strong>Candidates with no email</strong> — automation marks them <code>skipped</code>, not failed.</li>
+      <li><strong>Dry-run</strong> — every email &amp; booking can be previewed (exact subject/body/attendees) before anything is sent.</li>
+      <li><strong>Graph cycles</strong> — the automation engine refuses to run a workflow wired back on itself.</li>
+    </ul>
+  </div>
+</div>
+
+<!-- ============================= 4. ARCHITECTURE ============================= -->
+<div class="section">
+  <span class="eyebrow">Section 4</span>
+  <h2>System Design &amp; Architecture</h2>
+  <div class="rule"></div>
+  <p class="lead">A three-tier, local-first architecture: a browser client, identity providers, and a
+  local backend that brokers every privileged operation — AI calls, document parsing, persistence and
+  third-party automation.</p>
+
+  <h3>4.1 High-level architecture</h3>
+  <figure class="no-break">
+    <svg viewBox="0 0 760 540" width="100%" xmlns="http://www.w3.org/2000/svg" font-family="Segoe UI, sans-serif">
+      <defs>
+        <marker id="arr" markerWidth="9" markerHeight="9" refX="7" refY="3.2" orient="auto">
+          <path d="M0,0 L8,3.2 L0,6.4 z" fill="#475569"/>
+        </marker>
+      </defs>
+
+      <!-- TIER 1: client -->
+      <rect x="20" y="20" width="220" height="180" rx="12" fill="#eff6ff" stroke="#bfdbfe"/>
+      <text x="36" y="44" font-size="12" font-weight="700" fill="#1d4ed8">TIER 1 · CHROME EXTENSION (MV3)</text>
+      <rect x="36" y="56" width="188" height="26" rx="6" fill="#fff" stroke="#bfdbfe"/><text x="46" y="73" font-size="10.5" fill="#0f172a">popup.js · side-panel UI</text>
+      <rect x="36" y="88" width="188" height="26" rx="6" fill="#fff" stroke="#bfdbfe"/><text x="46" y="105" font-size="10.5" fill="#0f172a">auth.js · PKCE OAuth</text>
+      <rect x="36" y="120" width="90" height="26" rx="6" fill="#fff" stroke="#bfdbfe"/><text x="46" y="137" font-size="10.5" fill="#0f172a">graph.js</text>
+      <rect x="134" y="120" width="90" height="26" rx="6" fill="#fff" stroke="#bfdbfe"/><text x="144" y="137" font-size="10.5" fill="#0f172a">gmail.js</text>
+      <rect x="36" y="152" width="188" height="26" rx="6" fill="#fff" stroke="#bfdbfe"/><text x="46" y="169" font-size="10.5" fill="#0f172a">background.js · service worker</text>
+
+      <!-- TIER 2: identity / providers -->
+      <rect x="20" y="230" width="220" height="160" rx="12" fill="#f5f3ff" stroke="#ddd6fe"/>
+      <text x="36" y="254" font-size="12" font-weight="700" fill="#6d28d9">IDENTITY &amp; MAIL APIs</text>
+      <rect x="36" y="266" width="188" height="26" rx="6" fill="#fff" stroke="#ddd6fe"/><text x="46" y="283" font-size="10.5" fill="#0f172a">Microsoft Identity (PKCE)</text>
+      <rect x="36" y="298" width="188" height="26" rx="6" fill="#fff" stroke="#ddd6fe"/><text x="46" y="315" font-size="10.5" fill="#0f172a">Microsoft Graph · /me/messages</text>
+      <rect x="36" y="330" width="188" height="26" rx="6" fill="#fff" stroke="#ddd6fe"/><text x="46" y="347" font-size="10.5" fill="#0f172a">Google OAuth + Gmail API</text>
+      <rect x="36" y="362" width="188" height="22" rx="6" fill="#fff" stroke="#ddd6fe"/><text x="46" y="377" font-size="10.5" fill="#0f172a">Google Calendar + Meet</text>
+
+      <!-- TIER 3: backend -->
+      <rect x="300" y="20" width="300" height="370" rx="12" fill="#f0fdfa" stroke="#99f6e4"/>
+      <text x="316" y="44" font-size="12" font-weight="700" fill="#0f766e">TIER 2 · LOCAL NODE / EXPRESS BACKEND</text>
+      <rect x="316" y="56" width="268" height="28" rx="6" fill="#fff" stroke="#99f6e4"/><text x="326" y="74" font-size="10.5" fill="#0f172a">server.js · Express · CORS · Helmet</text>
+
+      <rect x="316" y="94" width="130" height="26" rx="6" fill="#fff" stroke="#99f6e4"/><text x="326" y="111" font-size="10" fill="#0f172a">extract.js (PDF/DOCX)</text>
+      <rect x="454" y="94" width="130" height="26" rx="6" fill="#fff" stroke="#99f6e4"/><text x="464" y="111" font-size="10" fill="#0f172a">ai.js (LLM broker)</text>
+      <rect x="316" y="126" width="130" height="26" rx="6" fill="#fff" stroke="#99f6e4"/><text x="326" y="143" font-size="10" fill="#0f172a">chunker · embeddings</text>
+      <rect x="454" y="126" width="130" height="26" rx="6" fill="#fff" stroke="#99f6e4"/><text x="464" y="143" font-size="10" fill="#0f172a">classify · segregate</text>
+      <rect x="316" y="158" width="130" height="26" rx="6" fill="#fff" stroke="#99f6e4"/><text x="326" y="175" font-size="10" fill="#0f172a">rag · search (hybrid)</text>
+      <rect x="454" y="158" width="130" height="26" rx="6" fill="#fff" stroke="#99f6e4"/><text x="464" y="175" font-size="10" fill="#0f172a">chat (RAG answer)</text>
+      <rect x="316" y="190" width="130" height="26" rx="6" fill="#fff" stroke="#99f6e4"/><text x="326" y="207" font-size="10" fill="#0f172a">automation engine</text>
+      <rect x="454" y="190" width="130" height="26" rx="6" fill="#fff" stroke="#99f6e4"/><text x="464" y="207" font-size="10" fill="#0f172a">google.js (Cal/Meet/Gmail)</text>
+
+      <!-- storage -->
+      <text x="316" y="244" font-size="11" font-weight="700" fill="#0f766e">PERSISTENCE</text>
+      <rect x="316" y="252" width="84" height="44" rx="6" fill="#ecfeff" stroke="#67e8f9"/><text x="326" y="270" font-size="9.5" fill="#0f172a">SQLite</text><text x="326" y="284" font-size="8.5" fill="#0e7490">better-sqlite3</text>
+      <rect x="408" y="252" width="84" height="44" rx="6" fill="#ecfeff" stroke="#67e8f9"/><text x="418" y="270" font-size="9.5" fill="#0f172a">sqlite-vec</text><text x="418" y="284" font-size="8.5" fill="#0e7490">+ FTS5</text>
+      <rect x="500" y="252" width="84" height="44" rx="6" fill="#ecfeff" stroke="#67e8f9"/><text x="510" y="270" font-size="9.5" fill="#0f172a">uploads/</text><text x="510" y="284" font-size="8.5" fill="#0e7490">file bytes</text>
+      <rect x="316" y="304" width="130" height="40" rx="6" fill="#ecfeff" stroke="#67e8f9"/><text x="326" y="322" font-size="9.5" fill="#0f172a">Pinecone (optional)</text><text x="326" y="336" font-size="8.5" fill="#0e7490">scalable vectors</text>
+      <rect x="454" y="304" width="130" height="40" rx="6" fill="#ecfeff" stroke="#67e8f9"/><text x="464" y="322" font-size="9.5" fill="#0f172a">MongoDB (optional)</text><text x="464" y="336" font-size="8.5" fill="#0e7490">backup mirror</text>
+
+      <rect x="316" y="354" width="268" height="26" rx="6" fill="#fff" stroke="#99f6e4"/><text x="326" y="371" font-size="10" fill="#0f172a">public/ · recruiter dashboard (served static)</text>
+
+      <!-- TIER 4: AI providers + browser dashboard -->
+      <rect x="660" y="20" width="80" height="370" rx="12" fill="#fff7ed" stroke="#fed7aa"/>
+      <text x="700" y="44" font-size="11" font-weight="700" fill="#b45309" text-anchor="middle">AI</text>
+      <rect x="672" y="60" width="56" height="40" rx="6" fill="#fff" stroke="#fed7aa"/><text x="700" y="84" font-size="9" fill="#0f172a" text-anchor="middle">Groq</text>
+      <rect x="672" y="108" width="56" height="40" rx="6" fill="#fff" stroke="#fed7aa"/><text x="700" y="132" font-size="9" fill="#0f172a" text-anchor="middle">Claude</text>
+      <rect x="672" y="156" width="56" height="40" rx="6" fill="#fff" stroke="#fed7aa"/><text x="700" y="180" font-size="9" fill="#0f172a" text-anchor="middle">Gemini</text>
+      <rect x="672" y="208" width="56" height="56" rx="6" fill="#fff" stroke="#fed7aa"/><text x="700" y="232" font-size="8.5" fill="#0f172a" text-anchor="middle">Transf-</text><text x="700" y="244" font-size="8.5" fill="#0f172a" text-anchor="middle">ormers.js</text><text x="700" y="257" font-size="7.5" fill="#b45309" text-anchor="middle">(local)</text>
+
+      <!-- arrows -->
+      <line x1="240" y1="100" x2="300" y2="100" stroke="#475569" stroke-width="1.6" marker-end="url(#arr)"/>
+      <text x="246" y="92" font-size="8" fill="#475569">/score, /chat…</text>
+      <line x1="130" y1="200" x2="130" y2="230" stroke="#475569" stroke-width="1.6" marker-end="url(#arr)"/>
+      <text x="136" y="220" font-size="8" fill="#475569">OAuth</text>
+      <line x1="600" y1="120" x2="660" y2="100" stroke="#475569" stroke-width="1.6" marker-end="url(#arr)"/>
+      <line x1="240" y1="330" x2="300" y2="300" stroke="#94a3b8" stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#arr)"/>
+      <text x="244" y="322" font-size="8" fill="#64748b">automation</text>
+
+      <!-- browser dashboard note -->
+      <rect x="20" y="412" width="580" height="40" rx="10" fill="#f1f5f9" stroke="#cbd5e1"/>
+      <text x="34" y="430" font-size="10.5" font-weight="700" fill="#0f172a">Recruiter Dashboard (browser @ localhost:8787)</text>
+      <text x="34" y="445" font-size="9" fill="#475569">Chart.js · Overview / Candidates / AI Chat / Automation / Settings — talks to the same backend over HTTP.</text>
+      <line x1="300" y1="395" x2="300" y2="412" stroke="#475569" stroke-width="1.4" marker-end="url(#arr)"/>
+    </svg>
+    <figcaption>Figure 1 — Component &amp; tier architecture. The backend is the single trust boundary for keys, parsing and AI.</figcaption>
+  </figure>
+
+  <h3>4.2 Component responsibilities</h3>
+  <table class="lined">
+    <thead><tr><th style="width:22%">Component</th><th style="width:14%">Tier</th><th>Responsibility</th></tr></thead>
+    <tbody>
+      <tr><td><code>popup.js</code></td><td>Extension</td><td>Side-panel UI; orchestrates login, listing, scoring &amp; rendering.</td></tr>
+      <tr><td><code>auth.js</code></td><td>Extension</td><td>PKCE OAuth: code_verifier/challenge, token exchange, storage &amp; refresh.</td></tr>
+      <tr><td><code>graph.js</code> / <code>gmail.js</code></td><td>Extension</td><td>List messages &amp; download attachments from Outlook / Gmail.</td></tr>
+      <tr><td><code>background.js</code></td><td>Extension</td><td>MV3 service worker — alarms, redirect-URI logging, lifecycle.</td></tr>
+      <tr><td><code>server.js</code></td><td>Backend</td><td>Express app; all HTTP routes, CORS, Helmet, static dashboard.</td></tr>
+      <tr><td><code>extract.js</code></td><td>Backend</td><td>Decode base64 → text via pdf-parse (PDF) / mammoth (DOCX).</td></tr>
+      <tr><td><code>ai.js</code></td><td>Backend</td><td>Provider-agnostic LLM broker (Groq / Anthropic / Gemini); strict-JSON parsing.</td></tr>
+      <tr><td><code>chunker.js</code> · <code>embeddings.js</code></td><td>Backend</td><td>Split resume text into chunks; embed locally or via Google/Voyage.</td></tr>
+      <tr><td><code>classify.js</code> · <code>segregate.js</code></td><td>Backend</td><td>Assign role category / title; structured candidate field extraction.</td></tr>
+      <tr><td><code>rag.js</code> · <code>search.js</code></td><td>Backend</td><td>Hybrid retrieval (vector + FTS5 BM25) for search &amp; chat grounding.</td></tr>
+      <tr><td><code>chat.js</code></td><td>Backend</td><td>RAG answer generation; regex pre-parser for filter-style queries.</td></tr>
+      <tr><td><code>db.js</code></td><td>Backend</td><td>SQLite schema, migrations, vec0 &amp; FTS5 virtual tables.</td></tr>
+      <tr><td><code>automation.js</code> · <code>automationDb.js</code></td><td>Backend</td><td>Workflow engine (nodes, edges, run history) &amp; its persistence.</td></tr>
+      <tr><td><code>google.js</code></td><td>Backend</td><td>Calendar free/busy, event + Meet creation, Gmail send.</td></tr>
+      <tr><td><code>pinecone.js</code> · <code>mongo.js</code></td><td>Backend</td><td>Optional scalable vector store &amp; backup mirror with graceful fallback.</td></tr>
+    </tbody>
+  </table>
+
+  <h3>4.3 Data flow — RAG chat &amp; semantic search</h3>
+  <div class="steps">
+    <div class="step"><div class="idx"></div><div class="b"><h4>Query pre-parse</h4><p>A regex layer extracts structured intent (category, years, skills, location, top-N) so deterministic filters run in SQL <em>before</em> any LLM call — saving tokens.</p></div></div>
+    <div class="step"><div class="idx"></div><div class="b"><h4>Hybrid retrieval</h4><p>The query is embedded and matched against <code>chunk_vectors</code> (cosine) while FTS5 BM25 retrieves keyword hits; results are merged &amp; ranked.</p></div></div>
+    <div class="step"><div class="idx"></div><div class="b"><h4>Context assembly</h4><p>Top chunks plus structured candidate rows are packed into a compact grounding context.</p></div></div>
+    <div class="step"><div class="idx"></div><div class="b"><h4>LLM narration</h4><p>The model writes the final natural-language answer (optionally streamed via <code>/chat/stream</code>), grounded only in retrieved evidence.</p></div></div>
+  </div>
+
+  <h3>4.4 Data flow — automation run</h3>
+  <div class="steps">
+    <div class="step"><div class="idx"></div><div class="b"><h4>Trigger</h4><p>Operator presses <em>Execute</em> on a workflow (Manual-run trigger).</p></div></div>
+    <div class="step"><div class="idx"></div><div class="b"><h4>Filter &amp; branch</h4><p>Candidates flow through filters (score ≥ X, category, years, skills) and branch / top-N logic into action streams.</p></div></div>
+    <div class="step"><div class="idx"></div><div class="b"><h4>Actions</h4><p>Send OA (Gmail), schedule interview (Calendar free/busy → event + Meet), polite rejection, notify, log — each paced to respect rate limits.</p></div></div>
+    <div class="step"><div class="idx"></div><div class="b"><h4>Run history</h4><p>Every per-candidate result (sent / skipped / failed, with the API's error message) is recorded for audit. Dry-run renders everything without sending.</p></div></div>
+  </div>
+</div>
+
+<!-- ============================= 5. DATA MODEL ============================= -->
+<div class="section">
+  <span class="eyebrow">Section 5</span>
+  <h2>Data Model</h2>
+  <div class="rule"></div>
+  <p class="lead">SQLite (via <code>better-sqlite3</code>) is the single source of truth, extended with
+  <code>sqlite-vec</code> for vector search and FTS5 for keyword search. Pinecone and MongoDB are optional
+  mirrors enabled by configuration.</p>
+
+  <h3>5.1 Core tables</h3>
+  <table class="lined">
+    <thead><tr><th style="width:22%">Table</th><th>Purpose &amp; notable columns</th></tr></thead>
+    <tbody>
+      <tr><td><code>resumes</code></td><td>One row per scored candidate. Holds <code>score</code>, <code>category</code>, <code>role_title</code>, <code>review_json</code>, <code>raw_text</code>, plus enriched fields: <code>candidate_name</code>, <code>email</code>, <code>phone</code>, <code>location</code>, <code>years_experience</code>, <code>current_title/company</code>, <code>top_skills</code>, <code>education_json</code>, <code>certifications</code>, <code>companies</code>, <code>domains</code>, <code>remote_worked</code>, <code>managed_people</code>, and more. A unique partial index on <code>(email_id, attachment_id)</code> de-dupes re-scores.</td></tr>
+      <tr><td><code>chunks</code></td><td>Resume text split into retrieval-sized chunks; FK to <code>resumes</code> with cascade delete.</td></tr>
+      <tr><td><code>chunk_vectors</code></td><td><code>vec0</code> virtual table — fixed-dimension embeddings (<code>EMBED_DIM</code>; default 768) for cosine search.</td></tr>
+      <tr><td><code>chunks_fts</code></td><td>FTS5 virtual table mirroring chunk text via triggers — BM25 / keyword retrieval for hybrid search.</td></tr>
+      <tr><td><code>chat_threads</code></td><td>Conversations; optionally bound to a single <code>resume_id</code> for per-candidate chat.</td></tr>
+      <tr><td><code>chat_messages</code></td><td>Per-thread message log (role + content), indexed by <code>(thread_id, id)</code>.</td></tr>
+      <tr><td><em>automation tables</em></td><td>Workflows (nodes/edges), run history, interviewers &amp; availability windows, and message templates.</td></tr>
+    </tbody>
+  </table>
+
+  <h3>5.2 Storage strategy</h3>
+  <table class="lined">
+    <thead><tr><th style="width:24%">Store</th><th style="width:16%">Role</th><th>Behaviour</th></tr></thead>
+    <tbody>
+      <tr><td><strong>SQLite + sqlite-vec</strong></td><td>Primary</td><td>Always on. Holds all relational data, vectors &amp; FTS index in one local file (<code>data.db</code>).</td></tr>
+      <tr><td><strong>Pinecone</strong></td><td>Optional (scale)</td><td>When <code>PINECONE_API_KEY</code> is set, vectors dual-write to Pinecone + sqlite-vec; reads prefer Pinecone and fall back to sqlite-vec on any error.</td></tr>
+      <tr><td><strong>MongoDB</strong></td><td>Optional (mirror)</td><td>Backfill / backup mirror of resume records for durability.</td></tr>
+      <tr><td><strong>uploads/</strong></td><td>Blob store</td><td>Original PDF/DOCX bytes on disk; <code>file_path</code> references them for re-download / preview.</td></tr>
+    </tbody>
+  </table>
+  <div class="callout"><div class="ttl">Graceful degradation</div>A Pinecone outage degrades to local sqlite-vec search rather than returning empty results — availability is never gated on an external vector store.</div>
+</div>
+
+<!-- ============================= 6. API REFERENCE ============================= -->
+<div class="section">
+  <span class="eyebrow">Section 6</span>
+  <h2>API Reference</h2>
+  <div class="rule"></div>
+  <p class="lead">All routes are served by the local Express backend at <code>http://localhost:8787</code>.
+  Methods are colour-coded below.</p>
+  <div class="legend">
+    <span><span class="tag t-get">GET</span> read</span>
+    <span><span class="tag t-post">POST</span> create / action</span>
+    <span><span class="tag t-put">PUT</span> update</span>
+    <span><span class="tag t-del">DEL</span> delete</span>
+  </div>
+
+  <h3>6.1 Scoring &amp; resumes</h3>
+  <table class="lined">
+    <thead><tr><th style="width:14%">Method</th><th style="width:34%">Path</th><th>Purpose</th></tr></thead>
+    <tbody>
+      <tr><td><span class="tag t-post">POST</span></td><td><code>/score</code></td><td>Score an attachment (filename, contentType, contentBase64).</td></tr>
+      <tr><td><span class="tag t-post">POST</span></td><td><code>/score-text</code></td><td>Score pre-extracted raw text.</td></tr>
+      <tr><td><span class="tag t-post">POST</span></td><td><code>/classify</code></td><td>Categorise a resume / assign role title.</td></tr>
+      <tr><td><span class="tag t-post">POST</span></td><td><code>/summarize</code></td><td>Return (cached) summary / strengths / concerns.</td></tr>
+      <tr><td><span class="tag t-get">GET</span></td><td><code>/resumes</code></td><td>List candidates (filterable).</td></tr>
+      <tr><td><span class="tag t-get">GET</span></td><td><code>/resumes/by-category</code></td><td>Candidates grouped by category.</td></tr>
+      <tr><td><span class="tag t-get">GET</span> / <span class="tag t-post">POST</span></td><td><code>/resumes/search</code></td><td>Search candidates (query / filters).</td></tr>
+      <tr><td><span class="tag t-get">GET</span></td><td><code>/resumes/:id</code> · <code>/:id/file</code></td><td>Get one candidate / download original file.</td></tr>
+      <tr><td><span class="tag t-get">GET</span></td><td><code>/resumes/export.xlsx</code></td><td>Excel export of candidates + summaries.</td></tr>
+      <tr><td><span class="tag t-del">DEL</span></td><td><code>/resumes/:id</code></td><td>Delete a candidate (cascades chunks/vectors).</td></tr>
+      <tr><td><span class="tag t-get">GET</span></td><td><code>/stats</code></td><td>Aggregate metrics powering dashboard charts.</td></tr>
+    </tbody>
+  </table>
+
+  <h3>6.2 Search, chat &amp; segregation</h3>
+  <table class="lined">
+    <thead><tr><th style="width:14%">Method</th><th style="width:34%">Path</th><th>Purpose</th></tr></thead>
+    <tbody>
+      <tr><td><span class="tag t-post">POST</span></td><td><code>/parse-query</code></td><td>Regex pre-parse a natural-language query into filters.</td></tr>
+      <tr><td><span class="tag t-post">POST</span></td><td><code>/chat</code> · <code>/chat/stream</code></td><td>RAG chat (buffered / streamed).</td></tr>
+      <tr><td><span class="tag t-get">GET</span> / <span class="tag t-del">DEL</span></td><td><code>/threads</code> · <code>/threads/:id/messages</code></td><td>Manage chat threads &amp; history.</td></tr>
+      <tr><td><span class="tag t-post">POST</span></td><td><code>/segregate</code> · <code>/segregate/extract</code></td><td>Extract &amp; segregate structured candidate fields.</td></tr>
+    </tbody>
+  </table>
+
+  <h3>6.3 Automation, Google &amp; Gmail</h3>
+  <table class="lined">
+    <thead><tr><th style="width:14%">Method</th><th style="width:42%">Path</th><th>Purpose</th></tr></thead>
+    <tbody>
+      <tr><td><span class="tag t-get">GET</span><span class="tag t-post">POST</span><span class="tag t-put">PUT</span><span class="tag t-del">DEL</span></td><td><code>/automation/workflows[/:id]</code></td><td>CRUD on automation workflows.</td></tr>
+      <tr><td><span class="tag t-post">POST</span></td><td><code>/automation/workflows/:id/run</code></td><td>Execute a workflow (supports dry-run).</td></tr>
+      <tr><td><span class="tag t-get">GET</span></td><td><code>/automation/runs[/:id]</code></td><td>Run history &amp; per-candidate results.</td></tr>
+      <tr><td><span class="tag t-get">GET</span></td><td><code>/automation/google/auth</code> · <code>/callback</code> · <code>/status</code></td><td>Google OAuth connect flow &amp; status.</td></tr>
+      <tr><td><span class="tag t-get">GET</span><span class="tag t-post">POST</span><span class="tag t-del">DEL</span></td><td><code>/automation/interviewers[/:id]</code> · <code>/availability</code></td><td>Manage interviewers &amp; availability windows.</td></tr>
+      <tr><td><span class="tag t-get">GET</span><span class="tag t-post">POST</span><span class="tag t-put">PUT</span><span class="tag t-del">DEL</span></td><td><code>/automation/templates[/:id]</code></td><td>Message templates with placeholders.</td></tr>
+      <tr><td><span class="tag t-get">GET</span></td><td><code>/gmail/status</code> · <code>/gmail/auth</code> · <code>/gmail/messages</code></td><td>Gmail connection, listing &amp; attachments.</td></tr>
+      <tr><td><span class="tag t-get">GET</span></td><td><code>/health</code> · <code>/mongo/status</code></td><td>Backend &amp; storage health probes.</td></tr>
+    </tbody>
+  </table>
+  <p class="small">Endpoint list reflects the routes registered in <code>server.js</code>. Request/response
+  shapes follow the JSON contract described in §4 (e.g. the <code>/score</code> result returns
+  <code>score</code>, <code>breakdown</code>, <code>summary</code>, <code>strengths</code>, <code>concerns</code>, <code>recommendations</code>).</p>
+</div>
+
+<!-- ============================= 7. TECH STACK ============================= -->
+<div class="section">
+  <span class="eyebrow">Section 7</span>
+  <h2>Technology Stack</h2>
+  <div class="rule"></div>
+  <p class="lead">Every layer favours "works end-to-end, cheap to run, no build step." Plain modern
+  JavaScript throughout — no bundler, no framework for the MVP.</p>
+
+  <h3>7.1 Client — Chrome Extension</h3>
+  <table class="lined">
+    <thead><tr><th style="width:30%">Technology</th><th>Role</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Manifest V3</strong></td><td>Extension platform; service-worker background, side-panel UI.</td></tr>
+      <tr><td><strong>Vanilla JS (ES modules)</strong></td><td>No framework / build step — loadable unpacked directly.</td></tr>
+      <tr><td><strong>Chrome APIs</strong></td><td><code>identity</code> (launchWebAuthFlow), <code>storage</code>, <code>alarms</code>, <code>sidePanel</code>.</td></tr>
+      <tr><td><strong>Web Crypto (SHA-256)</strong></td><td>PKCE code-challenge generation in-browser.</td></tr>
+    </tbody>
+  </table>
+
+  <h3>7.2 Backend — Node.js service</h3>
+  <table class="lined">
+    <thead><tr><th style="width:30%">Technology</th><th>Role</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Node.js 22 + Express 4</strong></td><td>HTTP server &amp; routing (ES modules).</td></tr>
+      <tr><td><strong>Helmet · CORS</strong></td><td>Baseline security headers &amp; cross-origin access for the extension.</td></tr>
+      <tr><td><strong>pdf-parse · mammoth</strong></td><td>PDF &amp; DOCX text extraction.</td></tr>
+      <tr><td><strong>better-sqlite3</strong></td><td>Synchronous, fast embedded SQLite driver.</td></tr>
+      <tr><td><strong>sqlite-vec</strong></td><td>Vector search inside SQLite (<code>vec0</code> virtual tables).</td></tr>
+      <tr><td><strong>exceljs</strong></td><td>Excel (<code>.xlsx</code>) export of candidate data.</td></tr>
+      <tr><td><strong>dotenv</strong></td><td>Loads secrets from git-ignored <code>.env</code>.</td></tr>
+    </tbody>
+  </table>
+
+  <h3>7.3 AI &amp; retrieval</h3>
+  <table class="lined">
+    <thead><tr><th style="width:30%">Technology</th><th>Role</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Groq — Llama 3.3 70B</strong></td><td>Default scoring/chat LLM (free tier, fast).</td></tr>
+      <tr><td><strong>Anthropic Claude</strong></td><td>Alternative provider (<code>AI_PROVIDER=anthropic</code>).</td></tr>
+      <tr><td><strong>Google Gemini</strong></td><td>Alternative provider (<code>AI_PROVIDER=gemini</code>).</td></tr>
+      <tr><td><strong>Transformers.js (@huggingface/transformers)</strong></td><td>Local, key-free embeddings (default <code>all-MiniLM-L6-v2</code>, 384-d).</td></tr>
+      <tr><td><strong>Google text-embedding-004 / Voyage</strong></td><td>Optional hosted embedding providers (768-d / 512-d).</td></tr>
+      <tr><td><strong>Pinecone</strong></td><td>Optional managed vector DB for scale + fault tolerance.</td></tr>
+      <tr><td><strong>MongoDB</strong></td><td>Optional record mirror / backup.</td></tr>
+    </tbody>
+  </table>
+
+  <h3>7.4 Dashboard &amp; integrations</h3>
+  <table class="lined">
+    <thead><tr><th style="width:30%">Technology</th><th>Role</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Chart.js 4.4</strong></td><td>Six analytics charts on the recruiter dashboard.</td></tr>
+      <tr><td><strong>HTML / CSS (Manrope)</strong></td><td>Static dashboard served from <code>backend/public</code>.</td></tr>
+      <tr><td><strong>Microsoft Graph API</strong></td><td>List Outlook mail &amp; download attachments.</td></tr>
+      <tr><td><strong>Gmail API</strong></td><td>List Gmail mail, download attachments &amp; send messages.</td></tr>
+      <tr><td><strong>Google Calendar API + Meet</strong></td><td>Free/busy lookup, event creation, auto Meet links (<code>conferenceData</code>).</td></tr>
+      <tr><td><strong>Microsoft Identity / Google OAuth</strong></td><td>PKCE (extension) &amp; web OAuth (backend) for delegated access.</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<!-- ============================= 8. SECURITY ============================= -->
+<div class="section">
+  <span class="eyebrow">Section 8</span>
+  <h2>Security &amp; Privacy</h2>
+  <div class="rule"></div>
+
+  <div class="cards">
+    <div class="card"><div class="ic" style="background:var(--rose-l)">🗝️</div><h4>No keys in the browser</h4><p>Provider keys live only in <code>backend/.env</code>. Extension code is fully readable, so it never holds a secret.</p></div>
+    <div class="card"><div class="ic" style="background:var(--brand-l)">🪪</div><h4>PKCE, no client secret</h4><p>Auth-code + PKCE via a public client. SPA redirect URI enables CORS token exchange directly.</p></div>
+    <div class="card"><div class="ic" style="background:var(--green-l)">🏠</div><h4>Local-first data</h4><p>Resumes, scores &amp; chats stay on the operator's machine in SQLite. No cloud account required.</p></div>
+    <div class="card"><div class="ic" style="background:var(--violet-l)">🙈</div><h4>Secrets out of git</h4><p><code>.gitignore</code> covers <code>.env</code>, token caches, <code>node_modules</code> &amp; the database.</p></div>
+  </div>
+
+  <h3>8.1 Token handling</h3>
+  <ul>
+    <li>Access / refresh tokens are stored in <code>chrome.storage.local</code> (extension) and refreshed ~60 s before expiry.</li>
+    <li>Backend-side Google OAuth tokens are obtained via the web flow and used only for the operator's own Calendar/Gmail actions.</li>
+    <li>Least-privilege scopes: Microsoft <code>User.Read</code> + <code>Mail.Read</code>; Google <code>gmail.send</code>, <code>calendar.events</code>, <code>calendar.readonly</code>.</li>
+  </ul>
+
+  <h3>8.2 Data minimisation &amp; failure behaviour</h3>
+  <ul>
+    <li>Only attachments ending in <code>.pdf</code> / <code>.docx</code> are processed; inline images &amp; signatures are skipped.</li>
+    <li>The UI fails loudly — login errors, empty inboxes and backend-down are surfaced, never silent.</li>
+    <li>Automation defaults to safety: dry-run preview, candidate-without-email → <code>skipped</code>, partial failures recorded with the upstream error.</li>
+  </ul>
+
+  <div class="callout warn"><div class="ttl">MVP caveat</div>This is an MVP, not a hardened production system. Before any multi-user or internet-exposed deployment, add authentication on the backend, rate limiting, encrypted secret storage, and an AI-bias / fairness review of the scoring prompts.</div>
+</div>
+
+<!-- ============================= 9. SETUP ============================= -->
+<div class="section">
+  <span class="eyebrow">Section 9</span>
+  <h2>Setup &amp; Deployment</h2>
+  <div class="rule"></div>
+  <p class="lead">Three one-time manual steps, then run two processes. Full step-by-step lives in the
+  project <code>README.md</code>; this is the operational summary.</p>
+
+  <h3>9.1 Prerequisites</h3>
+  <ul>
+    <li>Node.js 18+ (developed on Node 22) and a Chromium browser (Chrome / Edge).</li>
+    <li>An Azure app registration (Microsoft) and a Google Cloud OAuth client for automation.</li>
+    <li>An AI provider key — Groq is free (<code>console.groq.com/keys</code>).</li>
+  </ul>
+
+  <h3>9.2 Run the backend</h3>
+  <table class="lined">
+    <thead><tr><th style="width:8%">#</th><th>Action</th></tr></thead>
+    <tbody>
+      <tr><td>1</td><td><code>cd backend &amp;&amp; npm install</code></td></tr>
+      <tr><td>2</td><td><code>copy .env.example .env</code> — fill <code>GROQ_API_KEY</code> (and Google values for automation).</td></tr>
+      <tr><td>3</td><td><code>npm run dev</code> → backend listens on <code>http://localhost:8787</code>.</td></tr>
+      <tr><td>4</td><td>Open <code>http://localhost:8787</code> for the recruiter dashboard.</td></tr>
+    </tbody>
+  </table>
+
+  <h3>9.3 Load the extension</h3>
+  <table class="lined">
+    <thead><tr><th style="width:8%">#</th><th>Action</th></tr></thead>
+    <tbody>
+      <tr><td>1</td><td><code>chrome://extensions</code> → enable <strong>Developer mode</strong> → <strong>Load unpacked</strong> → select <code>extension/</code>.</td></tr>
+      <tr><td>2</td><td>Open the service-worker console, copy the printed redirect URI (<code>https://&lt;id&gt;.chromiumapp.org/</code>).</td></tr>
+      <tr><td>3</td><td>In Azure, add it as a <strong>Single-page application</strong> redirect URI; copy the <strong>Application (client) ID</strong>.</td></tr>
+      <tr><td>4</td><td>Paste the client id into <code>extension/config.js</code>; reload the extension.</td></tr>
+      <tr><td>5</td><td>Click the toolbar icon → <strong>Connect Outlook</strong> (and/or Gmail) → start scoring.</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout ok"><div class="ttl">Definition of done</div><code>npm run dev</code> starts the backend; loading <code>extension/</code> unpacked shows a popup with "Connect Outlook"; after login the popup lists resume emails; clicking one renders a score + review; the dashboard shows the full pipeline.</div>
+
+  <h3>9.4 Smoke tests</h3>
+  <p>Automation logic is covered by <code>node test-automation.js</code> (29 tests — schema, CRUD, filters,
+  template rendering, end-to-end dry-run, cycle detection, route handlers; no network calls).</p>
+</div>
+
+<!-- ============================= 10. APPENDIX ============================= -->
+<div class="section">
+  <span class="eyebrow">Section 10</span>
+  <h2>Appendix</h2>
+  <div class="rule"></div>
+
+  <h3>10.1 Glossary</h3>
+  <table class="lined">
+    <thead><tr><th style="width:24%">Term</th><th>Meaning</th></tr></thead>
+    <tbody>
+      <tr><td><strong>PKCE</strong></td><td>Proof Key for Code Exchange — OAuth extension that secures the auth-code flow without a client secret.</td></tr>
+      <tr><td><strong>MV3</strong></td><td>Manifest V3 — current Chrome extension platform; background logic runs as a service worker.</td></tr>
+      <tr><td><strong>RAG</strong></td><td>Retrieval-Augmented Generation — ground the LLM in retrieved chunks before it answers.</td></tr>
+      <tr><td><strong>Embedding</strong></td><td>Numeric vector representing text meaning; nearby vectors = similar meaning.</td></tr>
+      <tr><td><strong>sqlite-vec / vec0</strong></td><td>SQLite extension &amp; virtual-table type for storing &amp; searching embeddings.</td></tr>
+      <tr><td><strong>FTS5</strong></td><td>SQLite full-text search module providing BM25 keyword ranking.</td></tr>
+      <tr><td><strong>Hybrid search</strong></td><td>Combining vector similarity with keyword (BM25) retrieval for better recall.</td></tr>
+      <tr><td><strong>Dry-run</strong></td><td>Execute an automation that renders all outputs without sending anything externally.</td></tr>
+      <tr><td><strong>conferenceData</strong></td><td>Google Calendar field that, on event creation, mints a fresh Google Meet link.</td></tr>
+    </tbody>
+  </table>
+
+  <h3>10.2 Key files &amp; references</h3>
+  <table class="lined">
+    <thead><tr><th style="width:34%">Path</th><th>What it is</th></tr></thead>
+    <tbody>
+      <tr><td><code>extension/</code></td><td>Chrome MV3 extension (popup, auth, graph, gmail, background).</td></tr>
+      <tr><td><code>backend/server.js</code></td><td>Express app &amp; all HTTP routes.</td></tr>
+      <tr><td><code>backend/.env.example</code></td><td>Full configuration reference (providers, embeddings, Pinecone, Google).</td></tr>
+      <tr><td><code>backend/public/</code></td><td>Recruiter dashboard (index.html, dashboard.js, automation.js, Chart.js).</td></tr>
+      <tr><td><code>README.md</code></td><td>Complete setup, Azure / Google registration &amp; troubleshooting guide.</td></tr>
+      <tr><td><code>CLAUDE.md</code></td><td>Project context &amp; architectural rules.</td></tr>
+    </tbody>
+  </table>
+
+  <div class="footer-note">
+    <span><strong>Resume Scorer</strong> — AI-Powered Resume Screening &amp; Recruitment Automation</span>
+    <span>Technical Documentation · v0.2.0 · 29 May 2026</span>
+  </div>
+</div>
+
+</body>
+</html>

@@ -64,8 +64,14 @@ export async function listResumeEmails({ topMessages = 75 } = {}) {
   // that cause Microsoft to leave `hasAttachments` unset, so the filter hides
   // messages whose PDFs are clearly visible in Outlook. Scanning more messages
   // and asking each one for its attachment list is the reliable path.
+  //
+  // Scope to the Inbox folder. `/me/messages` spans the whole mailbox including
+  // Sent Items, so a resume the user *sends* from Outlook would be ingested and
+  // tagged source:'outlook' even though it landed in another inbox. The source
+  // tag must mean "the inbox that received this resume," so we read only the
+  // Inbox. (Message ids stay valid for the /me/messages/{id}/attachments call.)
   const list = await graphGet(
-    `/me/messages?$top=${topMessages}` +
+    `/me/mailFolders/inbox/messages?$top=${topMessages}` +
     `&$select=id,subject,from,receivedDateTime,hasAttachments`
   );
 

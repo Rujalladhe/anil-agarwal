@@ -36,7 +36,32 @@
         </div>
         <button id="connectGmailBtn" class="secondary">Connect</button>
       </div>
+      <div class="connect-row" data-provider="imap">
+        <div class="connect-info">
+          <div class="connect-name">Custom domain (IMAP)</div>
+          <div class="connect-status muted small" id="imapStatus">Not connected</div>
+        </div>
+        <button id="connectImapBtn" class="secondary">Connect</button>
+      </div>
     </div>
+
+    <!-- IMAP settings form: hidden until the user clicks Connect on the IMAP row. -->
+    <form id="imapForm" class="imap-form hidden" autocomplete="off">
+      <p class="muted small">Works with any mailbox that supports IMAP (Zoho, Google&nbsp;Workspace, Microsoft&nbsp;365, cPanel hosts…). Use a provider <strong>app password</strong> where required. Credentials are sent to your local backend, never stored in the extension.</p>
+      <input id="imapHost" class="imap-input" placeholder="IMAP host — e.g. imap.zoho.com" />
+      <div class="imap-form-grid">
+        <input id="imapPort" class="imap-input" type="number" placeholder="993" />
+        <label class="imap-secure"><input type="checkbox" id="imapSecure" checked /> Use TLS</label>
+      </div>
+      <input id="imapUser" class="imap-input" placeholder="Email / username — e.g. hr@yourcompany.com" autocomplete="username" />
+      <input id="imapPass" class="imap-input" type="password" placeholder="Password / app password" autocomplete="new-password" />
+      <input id="imapMailbox" class="imap-input" placeholder="Mailbox (default: INBOX)" />
+      <div class="imap-form-actions">
+        <button type="button" id="imapTestBtn" class="secondary">Test</button>
+        <button type="submit" id="imapSaveBtn" class="primary">Connect</button>
+      </div>
+      <p id="imapFormMsg" class="muted small"></p>
+    </form>
 
     <button id="continueBtn" class="primary hidden">Continue</button>
     <p id="authError" class="error hidden"></p>

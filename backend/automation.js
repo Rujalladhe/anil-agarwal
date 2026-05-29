@@ -28,11 +28,11 @@ export async function runWorkflow(workflowId, {
   candidateIds = null,        // pre-selected; if null we pull everything
   manualOverrides = {}        // node-id -> partial config override (for ad-hoc edits)
 } = {}) {
-  const wf = getWorkflow(workflowId);
+  const wf = await getWorkflow(workflowId);
   if (!wf) throw new Error('Workflow not found.');
   if (!wf.enabled && mode === 'live') throw new Error('Workflow is disabled.');
 
-  const runId = createRun({ workflowId, mode });
+  const runId = await createRun({ workflowId, mode });
 
   const summary = {
     workflowId,
@@ -96,10 +96,10 @@ export async function runWorkflow(workflowId, {
     const status = summary.totals.errors === 0
       ? 'ok'
       : (summary.totals.errors < summary.totals.actions ? 'partial' : 'error');
-    finalizeRun(runId, { status, summary });
+    await finalizeRun(runId, { status, summary });
     return { runId, status, summary };
   } catch (err) {
-    finalizeRun(runId, { status: 'error', summary: { ...summary, error: err.message } });
+    await finalizeRun(runId, { status: 'error', summary: { ...summary, error: err.message } });
     throw err;
   }
 }
@@ -135,10 +135,10 @@ async function loadCandidates(candidateIds) {
   if (Array.isArray(candidateIds) && candidateIds.length) {
     ids = candidateIds.map(Number).filter(Number.isFinite);
   } else {
-    ids = listResumes().map((r) => r.id);
+    ids = (await listResumes()).map((r) => r.id);
   }
   if (ids.length === 0) return [];
-  const profiles = getResumeProfiles(ids);
+  const profiles = await getResumeProfiles(ids);
   return profiles.map(profileToItem);
 }
 
@@ -174,20 +174,21 @@ async function runNode(ctx, node, items) {
   const tag = node.type;
   try {
     if (tag.startsWith('trigger.'))  return { out: items };
-    if (tag === 'logic.filter')      return runFilter(ctx, node, items, cfg);
-    if (tag === 'logic.branch')      return runBranch(ctx, node, items, cfg);
-    if (tag === 'logic.limit')       return runLimit(ctx, node, items, cfg);
-    // The action handlers are async — must `await` here so a thrown error
-    // lands in the catch below instead of escaping as an unhandled rejection.
+    // Every handler is now async (they await DB writes). `await` here so a
+    // thrown error lands in the catch below instead of escaping as an
+    // unhandled rejection.
+    if (tag === 'logic.filter')      return await runFilter(ctx, node, items, cfg);
+    if (tag === 'logic.branch')      return await runBranch(ctx, node, items, cfg);
+    if (tag === 'logic.limit')       return await runLimit(ctx, node, items, cfg);
     if (tag === 'action.sendOaEmail')         return await runSendOaEmail(ctx, node, items, cfg);
     if (tag === 'action.scheduleInterview')   return await runScheduleInterview(ctx, node, items, cfg);
     if (tag === 'action.sendRejection')       return await runSendRejection(ctx, node, items, cfg);
-    if (tag === 'action.logRun')              return runLogNote(ctx, node, items, cfg);
-    if (tag === 'action.notify')              return runNotifyOwner(ctx, node, items, cfg);
+    if (tag === 'action.logRun')              return await runLogNote(ctx, node, items, cfg);
+    if (tag === 'action.notify')              return await runNotifyOwner(ctx, node, items, cfg);
     throw new Error(`Unknown node type: ${tag}`);
   } catch (err) {
     ctx.summary.totals.errors++;
-    recordAction({
+    await recordAction({
       runId: ctx.runId, nodeId: node.id, nodeType: node.type,
       status: 'error', detail: { error: err.message }
     });
@@ -197,13 +198,13 @@ async function runNode(ctx, node, items) {
 
 // --- Logic nodes ---------------------------------------------------------
 
-function runFilter(ctx, node, items, cfg) {
+async function runFilter(ctx, node, items, cfg) {
   const pass = [], fail = [];
   for (const it of items) {
     if (matchesFilter(it, cfg)) pass.push(it); else fail.push(it);
   }
   ctx.summary.totals.filtered += pass.length;
-  recordAction({
+  await recordAction({
     runId: ctx.runId, nodeId: node.id, nodeType: node.type,
     status: 'ok', detail: { in: items.length, pass: pass.length, fail: fail.length, cfg }
   });
@@ -230,22 +231,22 @@ function matchesFilter(it, cfg) {
   return true;
 }
 
-function runBranch(ctx, node, items, cfg) {
+async function runBranch(ctx, node, items, cfg) {
   const a = [], b = [];
   const threshold = Number(cfg.threshold ?? 75);
   for (const it of items) (it.score >= threshold ? a : b).push(it);
-  recordAction({
+  await recordAction({
     runId: ctx.runId, nodeId: node.id, nodeType: node.type,
     status: 'ok', detail: { threshold, top: a.length, rest: b.length }
   });
   return { out: a, top: a, rest: b };
 }
 
-function runLimit(ctx, node, items, cfg) {
+async function runLimit(ctx, node, items, cfg) {
   const n = Math.max(1, Math.min(500, Number(cfg.n) || 10));
   const sorted = [...items].sort((x, y) => (y.score - x.score));
   const out = sorted.slice(0, n);
-  recordAction({
+  await recordAction({
     runId: ctx.runId, nodeId: node.id, nodeType: node.type,
     status: 'ok', detail: { in: items.length, out: out.length, n }
   });
@@ -257,7 +258,7 @@ function runLimit(ctx, node, items, cfg) {
 async function runSendOaEmail(ctx, node, items, cfg) {
   ctx.summary.totals.actions++;
   let template;
-  if (cfg.templateId) template = getTemplate(Number(cfg.templateId));
+  if (cfg.templateId) template = await getTemplate(Number(cfg.templateId));
   if (!template) {
     template = {
       subject: cfg.subject || 'Online assessment for your application',
@@ -281,7 +282,7 @@ async function runSendOaEmail(ctx, node, items, cfg) {
     const body    = renderTemplate(template.body, ctxVars);
 
     if (!it.email) {
-      recordAction({
+      await recordAction({
         runId: ctx.runId, resumeId: it.resumeId, candidate: it.name,
         nodeId: node.id, nodeType: node.type,
         status: 'skipped', detail: { reason: 'no email on resume', subject }
@@ -290,7 +291,7 @@ async function runSendOaEmail(ctx, node, items, cfg) {
     }
 
     if (ctx.mode === 'dry-run') {
-      recordAction({
+      await recordAction({
         runId: ctx.runId, resumeId: it.resumeId, candidate: it.name,
         nodeId: node.id, nodeType: node.type,
         status: 'preview', detail: { to: it.email, subject, body }
@@ -299,11 +300,11 @@ async function runSendOaEmail(ctx, node, items, cfg) {
       continue;
     }
 
-    if (!googleConnected()) throw new Error('Gmail send requires Google to be connected.');
+    if (!(await googleConnected())) throw new Error('Gmail send requires Google to be connected.');
 
     try {
       const messageId = await sendGmail({ to: it.email, subject, body });
-      recordAction({
+      await recordAction({
         runId: ctx.runId, resumeId: it.resumeId, candidate: it.name,
         nodeId: node.id, nodeType: node.type,
         status: 'ok', detail: { to: it.email, subject, messageId }
@@ -311,7 +312,7 @@ async function runSendOaEmail(ctx, node, items, cfg) {
       sent.push(it);
     } catch (err) {
       ctx.summary.totals.errors++;
-      recordAction({
+      await recordAction({
         runId: ctx.runId, resumeId: it.resumeId, candidate: it.name,
         nodeId: node.id, nodeType: node.type,
         status: 'error', detail: { to: it.email, subject, error: err.message }
@@ -327,7 +328,7 @@ async function runScheduleInterview(ctx, node, items, cfg) {
   ctx.summary.totals.actions++;
 
   const interviewerIds = (cfg.interviewerIds || []).map(Number).filter(Number.isFinite);
-  const interviewers   = listInterviewers().filter((iv) => interviewerIds.includes(iv.id));
+  const interviewers   = (await listInterviewers()).filter((iv) => interviewerIds.includes(iv.id));
 
   if (interviewers.length === 0) {
     throw new Error('No interviewers selected for the schedule node.');
@@ -356,7 +357,7 @@ async function runScheduleInterview(ctx, node, items, cfg) {
   const out = [];
   for (const it of items) {
     if (!it.email) {
-      recordAction({
+      await recordAction({
         runId: ctx.runId, resumeId: it.resumeId, candidate: it.name,
         nodeId: node.id, nodeType: node.type,
         status: 'skipped', detail: { reason: 'no candidate email' }
@@ -366,7 +367,7 @@ async function runScheduleInterview(ctx, node, items, cfg) {
 
     if (ctx.mode === 'dry-run') {
       const stated = interviewers.flatMap((iv) => iv.availability || []);
-      recordAction({
+      await recordAction({
         runId: ctx.runId, resumeId: it.resumeId, candidate: it.name,
         nodeId: node.id, nodeType: node.type,
         status: 'preview',
@@ -385,7 +386,7 @@ async function runScheduleInterview(ctx, node, items, cfg) {
       continue;
     }
 
-    if (!googleConnected()) throw new Error('Calendar scheduling requires Google to be connected.');
+    if (!(await googleConnected())) throw new Error('Calendar scheduling requires Google to be connected.');
 
     // Try each interviewer in order. First one with a free slot wins this
     // candidate. Each call respects only THAT interviewer's availability
@@ -414,7 +415,7 @@ async function runScheduleInterview(ctx, node, items, cfg) {
     if (!chosenIv) {
       ctx.summary.totals.errors++;
       const anyStated = interviewers.some((iv) => (iv.availability || []).length);
-      recordAction({
+      await recordAction({
         runId: ctx.runId, resumeId: it.resumeId, candidate: it.name,
         nodeId: node.id, nodeType: node.type,
         status: 'error',
@@ -453,7 +454,7 @@ Resume on file in Resume Scorer (id #${it.resumeId})`,
       const meetUrl = event.hangoutLink ||
         event.conferenceData?.entryPoints?.find((p) => p.entryPointType === 'video')?.uri ||
         '';
-      recordAction({
+      await recordAction({
         runId: ctx.runId, resumeId: it.resumeId, candidate: it.name,
         nodeId: node.id, nodeType: node.type,
         status: 'ok',
@@ -467,7 +468,7 @@ Resume on file in Resume Scorer (id #${it.resumeId})`,
       out.push(it);
     } catch (err) {
       ctx.summary.totals.errors++;
-      recordAction({
+      await recordAction({
         runId: ctx.runId, resumeId: it.resumeId, candidate: it.name,
         nodeId: node.id, nodeType: node.type,
         status: 'error', detail: { error: err.message, interviewer: chosenIv.email }
@@ -495,7 +496,7 @@ async function runSendRejection(ctx, node, items, cfg) {
   const sent = [];
   for (const it of items) {
     if (maxScore != null && Number.isFinite(it.score) && it.score > maxScore) {
-      recordAction({
+      await recordAction({
         runId: ctx.runId, resumeId: it.resumeId, candidate: it.name,
         nodeId: node.id, nodeType: node.type,
         status: 'skipped',
@@ -504,7 +505,7 @@ async function runSendRejection(ctx, node, items, cfg) {
       continue;
     }
     if (!it.email) {
-      recordAction({
+      await recordAction({
         runId: ctx.runId, resumeId: it.resumeId, candidate: it.name,
         nodeId: node.id, nodeType: node.type,
         status: 'skipped', detail: { reason: 'no email' }
@@ -517,7 +518,7 @@ async function runSendRejection(ctx, node, items, cfg) {
     const bodyOut = renderTemplate(tier === 'near-miss' ? bodyNearMiss    : bodyDefault,    vars);
 
     if (ctx.mode === 'dry-run') {
-      recordAction({
+      await recordAction({
         runId: ctx.runId, resumeId: it.resumeId, candidate: it.name,
         nodeId: node.id, nodeType: node.type,
         status: 'preview', detail: { to: it.email, subject: subj, body: bodyOut, tier, score: it.score }
@@ -525,10 +526,10 @@ async function runSendRejection(ctx, node, items, cfg) {
       sent.push(it);
       continue;
     }
-    if (!googleConnected()) throw new Error('Rejection send requires Google to be connected.');
+    if (!(await googleConnected())) throw new Error('Rejection send requires Google to be connected.');
     try {
       const id = await sendGmail({ to: it.email, subject: subj, body: bodyOut });
-      recordAction({
+      await recordAction({
         runId: ctx.runId, resumeId: it.resumeId, candidate: it.name,
         nodeId: node.id, nodeType: node.type,
         status: 'ok', detail: { to: it.email, subject: subj, messageId: id, tier, score: it.score }
@@ -536,7 +537,7 @@ async function runSendRejection(ctx, node, items, cfg) {
       sent.push(it);
     } catch (err) {
       ctx.summary.totals.errors++;
-      recordAction({
+      await recordAction({
         runId: ctx.runId, resumeId: it.resumeId, candidate: it.name,
         nodeId: node.id, nodeType: node.type,
         status: 'error', detail: { error: err.message, tier }
@@ -571,8 +572,8 @@ Warm regards,
 Recruiting Team`;
 }
 
-function runLogNote(ctx, node, items, cfg) {
-  recordAction({
+async function runLogNote(ctx, node, items, cfg) {
+  await recordAction({
     runId: ctx.runId, nodeId: node.id, nodeType: node.type,
     status: 'ok',
     detail: { note: cfg.note || '', count: items.length, candidates: items.slice(0, 50).map((i) => i.name) }
@@ -580,10 +581,10 @@ function runLogNote(ctx, node, items, cfg) {
   return { out: items };
 }
 
-function runNotifyOwner(ctx, node, items, cfg) {
+async function runNotifyOwner(ctx, node, items, cfg) {
   // Lightweight: just a recorded notification line; the dashboard surfaces it
   // in the run-history panel. Hooking up Slack/webhooks is a follow-up.
-  recordAction({
+  await recordAction({
     runId: ctx.runId, nodeId: node.id, nodeType: node.type,
     status: 'ok',
     detail: {

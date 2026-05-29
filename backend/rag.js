@@ -1,26 +1,25 @@
 // RAG: chunk a resume, embed each chunk, store vectors. Retrieve top-K
 // chunks for a query via TWO signals merged with Reciprocal Rank Fusion:
-//   1. semantic vector search (Pinecone primary, sqlite-vec fallback)
-//   2. lexical BM25 search   (sqlite FTS5)
+//   1. semantic vector search (Pinecone)
+//   2. lexical BM25 search   (Mongo $text index on chunks.text)
 // RRF is the standard hybrid-retrieval fusion: each chunk gets
 //   score = sum over signals of 1 / (k + rank_in_signal)
 // where k=60 is the classic constant. Chunks that rank high in EITHER
 // signal surface; chunks that rank high in BOTH surface even more.
 //
 // Vector store strategy:
-//   - sqlite-vec is the local source of truth; every write goes there first.
-//   - If PINECONE_API_KEY is set we ALSO upsert into Pinecone after the local
-//     write succeeds. Reads then prefer Pinecone (scales horizontally) and
-//     fall back to sqlite-vec on any Pinecone error -- so a Pinecone outage
-//     degrades to "slower local search", never "no results".
+//   - Chunk TEXT lives in Mongo (chunks collection); embeddings live ONLY in
+//     Pinecone. Vector search returns chunk ids which we hydrate from Mongo.
+//   - Pinecone is the only vector store. On a Pinecone error the vector signal
+//     returns [] and BM25 still contributes to the fused result.
 
 import { chunkResumeText } from './chunker.js';
 import { embedTexts, embedQuery } from './embeddings.js';
 import {
-  replaceChunksForResume, searchChunks, searchChunksBM25, hydrateChunksByIds
+  replaceChunksForResume, searchChunksBM25, hydrateChunksByIds
 } from './db.js';
 import {
-  isPineconeEnabled, upsertResumeChunks, queryNearestChunkIds
+  isPineconeEnabled, upsertResumeChunks, queryNearestChunkIds, deleteResumeVectors
 } from './pinecone.js';
 
 export async function indexResume(resumeId, rawText) {
@@ -35,14 +34,16 @@ export async function indexResume(resumeId, rawText) {
     );
   }
   const items = chunkTexts.map((text, i) => ({ text, embedding: embeddings[i] }));
-  // Local write first (synchronous, source of truth). Returns the inserted
-  // chunk row IDs so we can reuse them as Pinecone vector IDs.
-  const chunkIds = replaceChunksForResume(resumeId, items);
-  // Dual-write to Pinecone. Awaited so an early failure surfaces in logs,
-  // but wrapped so it can't fail the indexing call -- sqlite-vec already has
-  // the data and search will silently fall back to it.
+  // Mongo write first (source of truth for chunk text). Returns the inserted
+  // chunk ids so we can reuse them as Pinecone vector ids.
+  const chunkIds = await replaceChunksForResume(resumeId, items);
+  // Upsert vectors to Pinecone. Re-indexing allocates NEW chunk ids, so clear
+  // this resume's stale vectors first (the old delete-then-insert the SQLite
+  // path did in one transaction). Wrapped so a Pinecone hiccup can't fail the
+  // whole indexing call -- the text is already safely in Mongo.
   if (isPineconeEnabled()) {
     try {
+      await deleteResumeVectors(resumeId);
       await upsertResumeChunks(resumeId, chunkIds, items);
     } catch (err) {
       console.warn(`[indexResume] Pinecone upsert failed for resume ${resumeId}: ${err.message}`);
@@ -51,28 +52,19 @@ export async function indexResume(resumeId, rawText) {
   return { chunks: items.length };
 }
 
-// Run a vector search, preferring Pinecone when enabled and silently falling
-// back to sqlite-vec on any error. Returns the same shape as searchChunks()
-// so the caller doesn't need to know which backend served the result.
+// Run a vector search via Pinecone, hydrating text from Mongo by chunk id.
+// Returns [] if Pinecone is disabled, errors, or has no hits (BM25 still
+// contributes in the hybrid path).
 export async function searchChunksWithFallback({ queryEmbedding, topK, resumeId }) {
-  if (isPineconeEnabled()) {
-    const matches = await queryNearestChunkIds({ queryEmbedding, topK, resumeId });
-    // matches === null means Pinecone errored; fall through to sqlite-vec.
-    if (matches && matches.length) {
-      const orderedIds = matches.map((m) => m.chunk_id);
-      const hydrated = hydrateChunksByIds(orderedIds);
-      // Pinecone returns cosine similarity (higher = better). Convert to a
-      // distance-like field so logging / debugging tools stay consistent
-      // with the sqlite-vec path; RRF only uses rank order so the actual
-      // numeric value here doesn't matter for fusion.
-      const scoreById = new Map(matches.map((m) => [m.chunk_id, m.score]));
-      return hydrated.map((h) => ({ ...h, distance: 1 - (scoreById.get(h.chunk_id) ?? 0) }));
-    }
-    // matches === [] is a legitimate "no hits" answer from Pinecone -- only
-    // fall through to sqlite-vec when matches is null (i.e. errored).
-    if (matches !== null) return [];
-  }
-  return searchChunks({ queryEmbedding, topK, resumeId });
+  if (!isPineconeEnabled()) return [];
+  const matches = await queryNearestChunkIds({ queryEmbedding, topK, resumeId });
+  if (!matches || !matches.length) return [];
+  const orderedIds = matches.map((m) => m.chunk_id);
+  const hydrated = await hydrateChunksByIds(orderedIds);
+  // Pinecone returns cosine similarity (higher = better). Convert to a
+  // distance-like field for consistent logging; RRF only uses rank order.
+  const scoreById = new Map(matches.map((m) => [m.chunk_id, m.score]));
+  return hydrated.map((h) => ({ ...h, distance: 1 - (scoreById.get(h.chunk_id) ?? 0) }));
 }
 
 // Vector-only retrieval (kept for callers that need it).
@@ -100,7 +92,7 @@ export async function retrieveHybrid({ query, resumeId = null, topK = 10 }) {
     console.warn('[retrieveHybrid] vector search failed:', err.message);
   }
   try {
-    bm25Hits = searchChunksBM25({ query, topK: overFetch, resumeId });
+    bm25Hits = await searchChunksBM25({ query, topK: overFetch, resumeId });
   } catch (err) {
     console.warn('[retrieveHybrid] bm25 search failed:', err.message);
   }

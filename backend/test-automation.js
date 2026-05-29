@@ -1,17 +1,17 @@
-// Smoke tests for the automation builder. Hits a temp SQLite DB and the
-// real engine. Skips anything that needs Google (Calendar / Gmail). Run with:
+// Smoke tests for the automation builder. Hits a THROWAWAY Mongo database and
+// the real engine. Skips anything that needs Google (Calendar / Gmail). Run:
 //
 //   node test-automation.js
 //
+// Requires MONGODB_URI in backend/.env. Uses a uniquely-named test database
+// that is dropped at the end, so it never touches real data.
 // Exits non-zero on first failure.
 
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { unlinkSync, existsSync } from 'node:fs';
+import 'dotenv/config';
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const TMP_DB = join(__dirname, `.test-automation-${Date.now()}.db`);
-process.env.DB_PATH = TMP_DB;
+// Point every Mongo-using module at a throwaway database. MUST be set before
+// any import that reads MONGODB_DB at module-load time (mongo.js).
+process.env.MONGODB_DB = `resume_scorer_test_${Date.now()}`;
 // We don't want chat.js or rag.js to need real API keys for these tests.
 process.env.AI_PROVIDER = 'groq';
 
@@ -25,19 +25,19 @@ function ok(name, cond, detail = '') {
 function section(title) { out.push(`\n${title}`); }
 
 async function main() {
-  // Late imports so DB_PATH takes effect first.
+  // Late imports so the env above is in effect first.
   const db = await import('./db.js');
   const adb = await import('./automationDb.js');
   const eng = await import('./automation.js');
 
   section('schema + seeding');
-  adb.ensureAutomationSchema();
-  adb.seedDefaults();
-  ok('default workflows seeded', adb.listWorkflows().length >= 2);
-  ok('default OA template seeded', adb.listTemplates().length >= 1);
+  await adb.ensureAutomationSchema();
+  await adb.seedDefaults();
+  ok('default workflows seeded', (await adb.listWorkflows()).length >= 2);
+  ok('default OA template seeded', (await adb.listTemplates()).length >= 1);
 
   section('CRUD: workflow');
-  const wfId = adb.createWorkflow({
+  const wfId = await adb.createWorkflow({
     name: 'Test wf',
     description: 'unit test workflow',
     graph: {
@@ -53,19 +53,19 @@ async function main() {
     }
   });
   ok('createWorkflow returns id', Number.isFinite(wfId));
-  const fetched = adb.getWorkflow(wfId);
+  const fetched = await adb.getWorkflow(wfId);
   ok('getWorkflow round-trips graph', fetched.graph.nodes.length === 3);
   ok('getWorkflow round-trips edges', fetched.graph.edges.length === 2);
 
-  adb.updateWorkflow(wfId, { name: 'Renamed' });
-  ok('updateWorkflow renames', adb.getWorkflow(wfId).name === 'Renamed');
+  await adb.updateWorkflow(wfId, { name: 'Renamed' });
+  ok('updateWorkflow renames', (await adb.getWorkflow(wfId)).name === 'Renamed');
 
   section('CRUD: interviewers + templates');
-  const ivId = adb.createInterviewer({ name: 'Anita Roy', email: 'anita@example.com', calendarId: 'primary', timezone: 'Asia/Kolkata' });
+  const ivId = await adb.createInterviewer({ name: 'Anita Roy', email: 'anita@example.com', calendarId: 'primary', timezone: 'Asia/Kolkata' });
   ok('createInterviewer returns id', Number.isFinite(ivId));
-  ok('listInterviewers includes new', adb.listInterviewers().some((iv) => iv.id === ivId));
+  ok('listInterviewers includes new', (await adb.listInterviewers()).some((iv) => iv.id === ivId));
 
-  const tplId = adb.createTemplate({
+  const tplId = await adb.createTemplate({
     name: 'unit-tpl',
     subject: 'Hi {{first_name}}',
     body:    'OA: {{oa_link}}',
@@ -74,7 +74,7 @@ async function main() {
   ok('createTemplate returns id', Number.isFinite(tplId));
 
   section('engine: filter helpers (pure)');
-  const { matchesFilter, renderTemplate, profileToItem, normalizeGraph } = eng.__testing;
+  const { matchesFilter, renderTemplate } = eng.__testing;
 
   const itemHigh = { score: 85, category: 'backend', years: 4, skills: ['python','aws'], email: 'a@b.com' };
   const itemLow  = { score: 30, category: 'backend', years: 1, skills: ['python'],       email: 'b@b.com' };
@@ -96,8 +96,7 @@ async function main() {
 
   section('engine: graph traversal w/ stub candidate (dry-run)');
   // Insert one synthetic resume so the engine has someone to process.
-  const { insertResume } = db;
-  const r = insertResume({
+  const r = await db.insertResume({
     filename: 'alex.pdf',
     candidateName: 'Alex Test',
     rawText: 'experienced backend dev',
@@ -115,7 +114,7 @@ async function main() {
 
   // Run a workflow that uses sendOaEmail in dry-run — should NOT need Google,
   // since dry-run never calls the API. Build one inline.
-  const wfOA = adb.createWorkflow({
+  const wfOA = await adb.createWorkflow({
     name: 'OA dry-run',
     graph: {
       nodes: [
@@ -131,29 +130,29 @@ async function main() {
   });
   const dr = await eng.runWorkflow(wfOA, { mode: 'dry-run' });
   ok('OA dry-run is ok', dr.status === 'ok', `status=${dr.status}`);
-  const run = adb.getRun(dr.runId);
+  const run = await adb.getRun(dr.runId);
   ok('OA dry-run produced preview rows', run.actions.some((a) => a.status === 'preview'));
   const previewRow = run.actions.find((a) => a.status === 'preview');
   ok('preview includes templated subject', previewRow?.detail?.subject?.includes('Hi Alex'));
   ok('preview body includes oa link', previewRow?.detail?.body?.includes('https://example.com/oa'));
 
   section('availability windows');
-  const ivWin = adb.addAvailabilityWindow(ivId, {
+  const ivWin = await adb.addAvailabilityWindow(ivId, {
     start: new Date(Date.now() + 86_400_000).toISOString().slice(0, 16) + ':00.000Z',
     end:   new Date(Date.now() + 86_400_000 + 2 * 3600_000).toISOString().slice(0, 16) + ':00.000Z'
   });
   ok('addAvailabilityWindow returns id', typeof ivWin.id === 'string');
-  ok('window persisted on interviewer', adb.getInterviewer(ivId).availability.length === 1);
+  ok('window persisted on interviewer', (await adb.getInterviewer(ivId)).availability.length === 1);
   let badThrew = false;
-  try { adb.addAvailabilityWindow(ivId, { start: 'x', end: 'y' }); }
+  try { await adb.addAvailabilityWindow(ivId, { start: 'x', end: 'y' }); }
   catch { badThrew = true; }
   ok('addAvailabilityWindow rejects bad dates', badThrew);
   let invertedThrew = false;
-  try { adb.addAvailabilityWindow(ivId, { start: '2030-01-01T10:00:00Z', end: '2030-01-01T09:00:00Z' }); }
+  try { await adb.addAvailabilityWindow(ivId, { start: '2030-01-01T10:00:00Z', end: '2030-01-01T09:00:00Z' }); }
   catch { invertedThrew = true; }
   ok('addAvailabilityWindow rejects inverted range', invertedThrew);
-  adb.removeAvailabilityWindow(ivId, ivWin.id);
-  ok('removeAvailabilityWindow drops the window', adb.getInterviewer(ivId).availability.length === 0);
+  await adb.removeAvailabilityWindow(ivId, ivWin.id);
+  ok('removeAvailabilityWindow drops the window', (await adb.getInterviewer(ivId)).availability.length === 0);
 
   section('scheduling math: interval merge + intersect');
   const { mergeIntervals, intersectIntervals } = (await import('./google.js')).__schedTesting;
@@ -183,18 +182,18 @@ async function main() {
 
   section('engine: rejection score gating + band split');
   // Add a couple more synthetic resumes so we have a score spread.
-  db.insertResume({
+  await db.insertResume({
     filename: 'mid.pdf', candidateName: 'Mid Scorer',
     rawText: 'mid', score: 55, category: 'backend', roleTitle: 'Engineer',
     reviewJson: { score: 55 }, candidate: { name: 'Mid Scorer', email: 'mid@example.com' }
   });
-  db.insertResume({
+  await db.insertResume({
     filename: 'low.pdf', candidateName: 'Low Scorer',
     rawText: 'low', score: 20, category: 'backend', roleTitle: 'Engineer',
     reviewJson: { score: 20 }, candidate: { name: 'Low Scorer', email: 'low@example.com' }
   });
 
-  const wfReject = adb.createWorkflow({
+  const wfReject = await adb.createWorkflow({
     name: 'reject test',
     graph: {
       nodes: [
@@ -210,7 +209,7 @@ async function main() {
     }
   });
   const rj = await eng.runWorkflow(wfReject, { mode: 'dry-run' });
-  const rjRun = adb.getRun(rj.runId);
+  const rjRun = await adb.getRun(rj.runId);
   const high = rjRun.actions.find((a) => a.candidate === 'Alex Test');
   const mid  = rjRun.actions.find((a) => a.candidate === 'Mid Scorer');
   const low  = rjRun.actions.find((a) => a.candidate === 'Low Scorer');
@@ -219,7 +218,7 @@ async function main() {
   ok('low (20) gets standard body',       low?.status === 'preview' && low.detail.tier === 'standard' && low.detail.body.startsWith('standard'));
 
   // With no maxScore set, the high-scorer should also be sent (acts as a normal action).
-  adb.updateWorkflow(wfReject, { graph: {
+  await adb.updateWorkflow(wfReject, { graph: {
     nodes: [
       { id: 't', type: 'trigger.manual', x:0, y:0, config:{} },
       { id: 'r', type: 'action.sendRejection', x:200, y:0, config: {} }
@@ -227,12 +226,12 @@ async function main() {
     edges: [{ from: 't', to: 'r' }]
   }});
   const rj2 = await eng.runWorkflow(wfReject, { mode: 'dry-run' });
-  const rjRun2 = adb.getRun(rj2.runId);
+  const rjRun2 = await adb.getRun(rj2.runId);
   const high2 = rjRun2.actions.find((a) => a.candidate === 'Alex Test');
   ok('with no maxScore, every score is allowed through', high2?.status === 'preview');
 
   section('engine: rejects cycles');
-  const wfBad = adb.createWorkflow({
+  const wfBad = await adb.createWorkflow({
     name: 'cycle',
     graph: {
       nodes: [
@@ -253,9 +252,6 @@ async function main() {
   ok('cycle detection trips engine', threw);
 
   section('routes: smoke via supertest-like fetch');
-  // Boot the express app inline (not as a separate server) by importing it.
-  // This relies on server.js exporting nothing; we use a quick HTTP listen
-  // on an ephemeral port.
   const { default: http } = await import('node:http');
   const express = (await import('express')).default;
   const cors = (await import('cors')).default;
@@ -263,13 +259,11 @@ async function main() {
   app.use(express.json({ limit: '2mb' }));
   app.use(cors());
 
-  // Mount the same handlers by re-importing server module would also boot
-  // the listener. Cheaper: mount our small subset of automation routes.
-  app.get('/automation/workflows', (_q, s) => s.json({ workflows: adb.listWorkflows() }));
+  app.get('/automation/workflows', async (_q, s) => s.json({ workflows: await adb.listWorkflows() }));
   app.post('/automation/workflows/:id/run', async (q, s) => {
     try {
-      const out = await eng.runWorkflow(Number(q.params.id), { mode: q.body?.mode || 'dry-run' });
-      s.json(out);
+      const result2 = await eng.runWorkflow(Number(q.params.id), { mode: q.body?.mode || 'dry-run' });
+      s.json(result2);
     } catch (err) { s.status(500).json({ error: err.message }); }
   });
   const server = http.createServer(app);
@@ -294,10 +288,14 @@ async function main() {
 
 main()
   .catch((err) => { console.error('UNCAUGHT', err); process.exitCode = 2; })
-  .finally(() => {
-    // Cleanup temp DB. (WAL/SHM files cleaned too.)
-    for (const ext of ['', '-wal', '-shm']) {
-      const p = TMP_DB + ext;
-      if (existsSync(p)) try { unlinkSync(p); } catch {}
+  .finally(async () => {
+    // Drop the throwaway test database, then close the connection.
+    try {
+      const { getMongoDb, closeMongo } = await import('./mongo.js');
+      const mdb = await getMongoDb();
+      await mdb.dropDatabase();
+      await closeMongo();
+    } catch (err) {
+      console.warn('[test-automation] cleanup failed:', err.message);
     }
   });

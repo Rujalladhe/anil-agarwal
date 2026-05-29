@@ -46,13 +46,13 @@ export function googleConfigured() {
   return Boolean(id && secret);
 }
 
-export function googleConnected() {
-  const t = kvGet(TOKENS_KEY);
+export async function googleConnected() {
+  const t = await kvGet(TOKENS_KEY);
   return !!(t && t.refresh_token);
 }
 
-export function googleProfile() {
-  return kvGet(PROFILE_KEY) || null;
+export async function googleProfile() {
+  return (await kvGet(PROFILE_KEY)) || null;
 }
 
 export function getAuthUrl(state = '') {
@@ -97,22 +97,22 @@ export async function exchangeCode(code) {
   };
   // If refresh_token is missing on a re-consent, keep the old one.
   if (!tokens.refresh_token) {
-    const old = kvGet(TOKENS_KEY) || {};
+    const old = (await kvGet(TOKENS_KEY)) || {};
     tokens.refresh_token = old.refresh_token || null;
   }
-  kvSet(TOKENS_KEY, tokens);
+  await kvSet(TOKENS_KEY, tokens);
 
   // Stash profile (email/name) for the UI.
   try {
     const me = await fetchJson('https://openidconnect.googleapis.com/v1/userinfo', tokens.access_token);
-    kvSet(PROFILE_KEY, { email: me.email, name: me.name, picture: me.picture });
+    await kvSet(PROFILE_KEY, { email: me.email, name: me.name, picture: me.picture });
   } catch { /* not fatal */ }
 
   return tokens;
 }
 
 export async function getAccessToken() {
-  const t = kvGet(TOKENS_KEY);
+  const t = await kvGet(TOKENS_KEY);
   if (!t) throw new Error('Google not connected. Visit Settings → Integrations to authorize.');
 
   // Refresh proactively if expiring in <60s.
@@ -140,20 +140,20 @@ async function refreshAccessToken(refreshToken) {
   const data = await res.json();
   if (!res.ok) throw new Error(`Google token refresh failed: ${data.error_description || data.error || res.status}`);
 
-  const old = kvGet(TOKENS_KEY) || {};
+  const old = (await kvGet(TOKENS_KEY)) || {};
   const merged = {
     ...old,
     access_token: data.access_token,
     expiry_ts:    Date.now() + ((data.expires_in || 3600) * 1000),
     token_type:   data.token_type || old.token_type || 'Bearer'
   };
-  kvSet(TOKENS_KEY, merged);
+  await kvSet(TOKENS_KEY, merged);
   return merged;
 }
 
-export function disconnectGoogle() {
-  kvDel(TOKENS_KEY);
-  kvDel(PROFILE_KEY);
+export async function disconnectGoogle() {
+  await kvDel(TOKENS_KEY);
+  await kvDel(PROFILE_KEY);
 }
 
 // --- Calendar / Meet -----------------------------------------------------
@@ -364,7 +364,7 @@ export function validIanaTimeZone(tz) {
 // Returns the Gmail message id.
 export async function sendGmail({ to, subject, body, cc, bcc, replyTo }) {
   const token = await getAccessToken();
-  const profile = googleProfile();
+  const profile = await googleProfile();
   const from = profile?.email ? `${profile.name || ''} <${profile.email}>`.trim() : undefined;
 
   const raw = buildRfc822({ from, to, cc, bcc, replyTo, subject, body });

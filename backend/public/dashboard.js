@@ -700,7 +700,7 @@ async function loadCandidates() {
     $('candidatesStatus').textContent = `${results.length} candidate${results.length === 1 ? '' : 's'}`;
   } catch (err) {
     $('candidatesStatus').textContent = '';
-    body.innerHTML = `<tr><td colspan="7" class="muted">Could not load: ${err.message}</td></tr>`;
+    body.innerHTML = `<tr><td colspan="8" class="muted">Could not load: ${err.message}</td></tr>`;
   }
 }
 
@@ -752,13 +752,14 @@ function renderCandidates(rows) {
   const body = $('candidatesBody');
   body.innerHTML = '';
   if (!rows.length) {
-    body.innerHTML = '<tr><td colspan="7" class="muted">No candidates match.</td></tr>';
+    body.innerHTML = '<tr><td colspan="8" class="muted">No candidates match.</td></tr>';
     return;
   }
   rows.forEach((r, i) => {
     const tr = document.createElement('tr');
     tr.innerHTML = `
       <td class="cell-num">${i + 1}</td>
+      <td class="cell-id">${applicantId(r.id)}</td>
       <td class="cell-candidate">
         <div class="cand-name"></div>
         <div class="cand-role"></div>

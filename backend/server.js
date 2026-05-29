@@ -31,7 +31,7 @@ import { chat, chatStream, summarizeText } from './chat.js';
 import { segregateResumes } from './segregate.js';
 import { searchResumes, parseRecruiterQuery, getStats } from './search.js';
 import {
-  getDb, insertResume, listResumes, listResumesByCategory, getResume,
+  insertResume, listResumes, listResumesByCategory, getResume,
   getResumeByEmailAttachment,
   listResumesForExport, listThreads, getThread, getMessages,
   deleteResume, deleteThread
@@ -52,6 +52,11 @@ import {
   validIanaTimeZone,
   listGmailResumeEmails, downloadGmailAttachment
 } from './google.js';
+import {
+  imapStatus, imapConfigured, setImapConfig, disconnectImap,
+  testImapConnection, fetchImapResumes,
+  listImapResumeEmails, downloadImapAttachment
+} from './imap.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const UPLOADS_DIR = join(__dirname, 'uploads');
@@ -130,11 +135,8 @@ function readSearchFilters(src) {
   };
 }
 
-// Touch the DB on startup so a misconfigured sqlite-vec binary fails loudly
-// at boot rather than on the first chat request.
-getDb();
-ensureAutomationSchema();
-try { seedDefaults(); } catch (err) { console.warn('[automation] seed failed:', err.message); }
+// DB startup runs in init() before app.listen (bottom of this file): connect
+// to Mongo (required), ensure indexes, and seed automation defaults.
 
 // In-process pub/sub for dashboard live updates. Every connected /events
 // client gets a frame whenever a resume is scored (from /score, /score-text,
@@ -187,27 +189,94 @@ app.get('/health', (_req, res) => {
   });
 });
 
-// Mongo status + manual backfill. Backfill walks every SQLite row in the
-// dual-written tables and upserts it into Mongo. Idempotent (uses _id =
-// SQLite primary key), safe to re-run. Useful the first time the user
-// pastes their MONGODB_URI -- existing data shows up in Mongo immediately.
+// Mongo status. (The one-time SQLite->Mongo import lives in the standalone
+// migrate-to-mongo.js script; Mongo is the source of truth now.)
 app.get('/mongo/status', (_req, res) => {
   res.json(mongoStatus());
 });
 
-app.post('/mongo/backfill', async (_req, res) => {
-  const db = getMongoDb && (await getMongoDb());
-  if (!db) {
-    return res.status(503).json({ error: 'Mongo not configured or unreachable. Set MONGODB_URI in backend/.env and restart.' });
+// Core scoring pipeline, shared by /score (extension uploads / Outlook / Gmail)
+// and /imap/sync (server-side custom-domain pull). Given raw bytes + optional
+// (emailId, attachmentId) cache keys it: returns the cached review on a hit, or
+// extracts text -> scores -> persists -> indexes -> broadcasts on a miss.
+// Throws an Error with code 'NO_TEXT' when the attachment yields too little
+// text to score. Callers map the result to their own response shape.
+async function processResume({ buffer, filename, contentType, emailId, attachmentId }) {
+  // Cache hit: this exact (email_id, attachment_id) was already scored.
+  // Skip extractText + scoreResume entirely (the expensive LLM call) and
+  // return the previously stored review. Saves the full ~2-4k LLM tokens per
+  // duplicate -- which is what makes re-syncing an IMAP mailbox cheap.
+  if (emailId && attachmentId) {
+    const cached = await getResumeByEmailAttachment(emailId, attachmentId);
+    if (cached) {
+      const cachedScored = cached.review || {};
+      broadcast('resume:scored', {
+        resumeId: cached.id,
+        candidateName: cached.candidate_name,
+        isNew: false,
+        score: cachedScored.score,
+        category: cachedScored.category,
+        categoryLabel: cachedScored.categoryLabel,
+        roleTitle: cachedScored.roleTitle,
+        filename: cached.filename,
+        ts: Date.now()
+      });
+      return {
+        cached: true, isNew: false, chunks: 0,
+        resumeId: cached.id, candidateName: cached.candidate_name,
+        scored: cachedScored
+      };
+    }
   }
-  try {
-    const summary = await backfillMongo(db);
-    res.json({ ok: true, summary });
-  } catch (err) {
-    console.error('[/mongo/backfill] error:', err);
-    res.status(500).json({ error: err.message });
+
+  const text = await extractText({ filename, contentType, buffer });
+  if (!text || text.trim().length < 30) {
+    const err = new Error('Could not extract enough text from the attachment. Is it a real resume PDF/DOCX (not a scan)?');
+    err.code = 'NO_TEXT';
+    throw err;
   }
-});
+
+  const scored = await scoreResume(text);
+
+  // Persist + index. Indexing requires an embedding key; if that fails we
+  // still keep the row + score (chunks will just be missing).
+  const candidateName = scored.candidate?.name || guessCandidateName(text);
+  const filePath = await saveAttachment(buffer, filename, contentType);
+  const { id: resumeId, isNew } = await insertResume({
+    emailId, attachmentId,
+    filename: filename || 'resume',
+    candidateName,
+    rawText: text,
+    score: scored.score,
+    category: scored.category,
+    roleTitle: scored.roleTitle,
+    reviewJson: scored,
+    candidate: scored.candidate,
+    filePath,
+    contentType
+  });
+
+  let indexed = { chunks: 0 };
+  if (isNew) {
+    try {
+      indexed = await indexResume(resumeId, text);
+    } catch (err) {
+      console.warn(`[processResume] indexing failed for resume ${resumeId}:`, err.message);
+    }
+  }
+
+  broadcast('resume:scored', {
+    resumeId, candidateName, isNew,
+    score: scored.score,
+    category: scored.category,
+    categoryLabel: scored.categoryLabel,
+    roleTitle: scored.roleTitle,
+    filename: filename || 'resume',
+    ts: Date.now()
+  });
+
+  return { cached: false, isNew, chunks: indexed.chunks, resumeId, candidateName, scored };
+}
 
 app.post('/score', async (req, res) => {
   const { filename, contentType, contentBase64, emailId, attachmentId } = req.body || {};
@@ -216,86 +285,11 @@ app.post('/score', async (req, res) => {
   }
 
   try {
-    // Cache hit: this exact (email_id, attachment_id) was already scored.
-    // Skip extractText + scoreResume entirely (the expensive LLM call) and
-    // return the previously stored review. The response shape matches what
-    // the slow path returns -- chunks: 0 because we don't re-index here,
-    // same as the original code's `let indexed = { chunks: 0 }` branch when
-    // isNew was false. Saves the full ~2-4k LLM tokens per duplicate.
-    if (emailId && attachmentId) {
-      const cached = getResumeByEmailAttachment(emailId, attachmentId);
-      if (cached) {
-        const cachedScored = cached.review || {};
-        broadcast('resume:scored', {
-          resumeId: cached.id,
-          candidateName: cached.candidate_name,
-          isNew: false,
-          score: cachedScored.score,
-          category: cachedScored.category,
-          categoryLabel: cachedScored.categoryLabel,
-          roleTitle: cachedScored.roleTitle,
-          filename: cached.filename,
-          ts: Date.now()
-        });
-        return res.json({
-          ...cachedScored,
-          resumeId: cached.id,
-          candidateName: cached.candidate_name,
-          chunks: 0
-        });
-      }
-    }
-
     const buffer = Buffer.from(contentBase64, 'base64');
-    const text = await extractText({ filename, contentType, buffer });
-
-    if (!text || text.trim().length < 30) {
-      return res.status(422).json({
-        error: 'Could not extract enough text from the attachment. Is it a real resume PDF/DOCX (not a scan)?'
-      });
-    }
-
-    const scored = await scoreResume(text);
-
-    // Persist + index. Indexing requires an embedding key; if that fails we
-    // still keep the row + score (chunks will just be missing).
-    const candidateName = scored.candidate?.name || guessCandidateName(text);
-    const filePath = await saveAttachment(buffer, filename, contentType);
-    const { id: resumeId, isNew } = insertResume({
-      emailId, attachmentId,
-      filename: filename || 'resume',
-      candidateName,
-      rawText: text,
-      score: scored.score,
-      category: scored.category,
-      roleTitle: scored.roleTitle,
-      reviewJson: scored,
-      candidate: scored.candidate,
-      filePath,
-      contentType
-    });
-
-    let indexed = { chunks: 0 };
-    if (isNew) {
-      try {
-        indexed = await indexResume(resumeId, text);
-      } catch (err) {
-        console.warn(`[/score] indexing failed for resume ${resumeId}:`, err.message);
-      }
-    }
-
-    broadcast('resume:scored', {
-      resumeId, candidateName, isNew,
-      score: scored.score,
-      category: scored.category,
-      categoryLabel: scored.categoryLabel,
-      roleTitle: scored.roleTitle,
-      filename: filename || 'resume',
-      ts: Date.now()
-    });
-
-    res.json({ ...scored, resumeId, candidateName, chunks: indexed.chunks });
+    const r = await processResume({ buffer, filename, contentType, emailId, attachmentId });
+    res.json({ ...r.scored, resumeId: r.resumeId, candidateName: r.candidateName, chunks: r.chunks });
   } catch (err) {
+    if (err.code === 'NO_TEXT') return res.status(422).json({ error: err.message });
     console.error('[/score] error:', err);
     res.status(500).json({ error: err.message || 'Internal error scoring resume.' });
   }
@@ -328,7 +322,7 @@ app.post('/score-text', async (req, res) => {
     const scored = await scoreResume(text);
 
     const candidateName = scored.candidate?.name || guessCandidateName(text);
-    const { id: resumeId, isNew } = insertResume({
+    const { id: resumeId, isNew } = await insertResume({
       filename: filename || 'pasted-text.txt',
       candidateName,
       rawText: text,
@@ -368,9 +362,9 @@ app.post('/score-text', async (req, res) => {
 // ---------------------------------------------------------------------------
 // Resumes
 
-app.get('/resumes', (_req, res) => {
+app.get('/resumes', async (_req, res) => {
   try {
-    res.json({ resumes: listResumes() });
+    res.json({ resumes: await listResumes() });
   } catch (err) {
     console.error('[/resumes] error:', err);
     res.status(500).json({ error: err.message });
@@ -378,9 +372,9 @@ app.get('/resumes', (_req, res) => {
 });
 
 // Ranked-by-category view. Each group is sorted by score desc.
-app.get('/resumes/by-category', (_req, res) => {
+app.get('/resumes/by-category', async (_req, res) => {
   try {
-    res.json({ groups: listResumesByCategory() });
+    res.json({ groups: await listResumesByCategory() });
   } catch (err) {
     console.error('[/resumes/by-category] error:', err);
     res.status(500).json({ error: err.message });
@@ -389,20 +383,20 @@ app.get('/resumes/by-category', (_req, res) => {
 
 // Structured search. Must be defined BEFORE /resumes/:id or that route
 // captures "search" as the id and returns 400.
-app.get('/resumes/search', (req, res) => {
+app.get('/resumes/search', async (req, res) => {
   try {
     const filters = readSearchFilters(req.query || {});
-    res.json({ filters, results: searchResumes(filters) });
+    res.json({ filters, results: await searchResumes(filters) });
   } catch (err) {
     console.error('[/resumes/search] error:', err);
     res.status(500).json({ error: err.message });
   }
 });
 
-app.post('/resumes/search', (req, res) => {
+app.post('/resumes/search', async (req, res) => {
   try {
     const filters = readSearchFilters(req.body || {});
-    res.json({ filters, results: searchResumes(filters) });
+    res.json({ filters, results: await searchResumes(filters) });
   } catch (err) {
     console.error('[/resumes/search POST] error:', err);
     res.status(500).json({ error: err.message });
@@ -412,10 +406,10 @@ app.post('/resumes/search', (req, res) => {
 // Serve the original PDF/DOCX bytes for a stored resume. This is what the
 // "Resume link" column in the Excel export points to. Defined BEFORE
 // /resumes/:id so the more-specific route wins.
-app.get('/resumes/:id/file', (req, res) => {
+app.get('/resumes/:id/file', async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id.' });
-  const resume = getResume(id);
+  const resume = await getResume(id);
   if (!resume) return res.status(404).json({ error: 'Resume not found.' });
   if (!resume.file_path) return res.status(404).json({ error: 'No file stored for this resume.' });
 
@@ -443,7 +437,7 @@ app.get('/resumes/:id/file', (req, res) => {
 // MUST be defined before /resumes/:id, otherwise that route swallows it.
 app.get('/resumes/export.xlsx', async (req, res) => {
   try {
-    const rows = listResumesForExport();
+    const rows = await listResumesForExport();
     const baseUrl = `${req.protocol}://${req.get('host')}`;
 
     const wb = new ExcelJS.Workbook();
@@ -490,16 +484,12 @@ app.get('/resumes/export.xlsx', async (req, res) => {
       const fileUrl = r.file_path ? `${baseUrl}/resumes/${r.id}/file` : '';
       const created = r.created_at ? new Date(r.created_at).toISOString() : '';
       // Short summary -- pulled from the cached AI review so this is FREE
-      // (no extra Groq call). Falls back to a tight slice of raw_text if
-      // the review didn't include one.
-      let summary = '';
-      try {
-        const fullRow = getResume(r.id);
-        summary = fullRow?.review?.summary || '';
-        if (!summary && fullRow?.raw_text) {
-          summary = fullRow.raw_text.slice(0, 240).replace(/\s+/g, ' ').trim();
-        }
-      } catch { /* ignore */ }
+      // (no extra Groq call). review + raw_text are projected by
+      // listResumesForExport(), so no per-row fetch is needed.
+      let summary = r.review?.summary || '';
+      if (!summary && r.raw_text) {
+        summary = r.raw_text.slice(0, 240).replace(/\s+/g, ' ').trim();
+      }
       const row = ws.addRow({
         rank: i + 1,
         name: r.candidate_name || '',
@@ -562,22 +552,26 @@ app.get('/resumes/export.xlsx', async (req, res) => {
   }
 });
 
-app.get('/resumes/:id', (req, res) => {
-  const id = Number(req.params.id);
-  if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id.' });
-  const resume = getResume(id);
-  if (!resume) return res.status(404).json({ error: 'Resume not found.' });
-  res.json(resume);
-});
-
-app.delete('/resumes/:id', (req, res) => {
+app.get('/resumes/:id', async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id.' });
   try {
-    // db.deleteResume handles chunk_vectors cleanup + ON DELETE CASCADE for
-    // chunks/threads/messages, plus mirrors the delete (and cascades) into
-    // Mongo.
-    const deleted = deleteResume(id);
+    const resume = await getResume(id);
+    if (!resume) return res.status(404).json({ error: 'Resume not found.' });
+    res.json(resume);
+  } catch (err) {
+    console.error('[/resumes/:id] error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/resumes/:id', async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id.' });
+  try {
+    // db.deleteResume removes the resume doc, its chunks, and cascades its
+    // chat threads/messages in Mongo, plus deletes the Pinecone vectors.
+    const deleted = await deleteResume(id);
     res.json({ deleted });
   } catch (err) {
     console.error('[DELETE /resumes/:id] error:', err);
@@ -588,9 +582,9 @@ app.delete('/resumes/:id', (req, res) => {
 // ---------------------------------------------------------------------------
 // Dashboard stats + structured search.
 
-app.get('/stats', (_req, res) => {
+app.get('/stats', async (_req, res) => {
   try {
-    res.json(getStats());
+    res.json(await getStats());
   } catch (err) {
     console.error('[/stats] error:', err);
     res.status(500).json({ error: err.message });
@@ -680,27 +674,32 @@ app.post('/parse-query', (req, res) => {
 // ---------------------------------------------------------------------------
 // Chat
 
-app.get('/threads', (_req, res) => {
+app.get('/threads', async (_req, res) => {
   try {
-    res.json({ threads: listThreads() });
+    res.json({ threads: await listThreads() });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-app.get('/threads/:id/messages', (req, res) => {
-  const id = Number(req.params.id);
-  if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id.' });
-  const thread = getThread(id);
-  if (!thread) return res.status(404).json({ error: 'Thread not found.' });
-  res.json({ thread, messages: getMessages(id) });
-});
-
-app.delete('/threads/:id', (req, res) => {
+app.get('/threads/:id/messages', async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id.' });
   try {
-    const deleted = deleteThread(id);
+    const thread = await getThread(id);
+    if (!thread) return res.status(404).json({ error: 'Thread not found.' });
+    res.json({ thread, messages: await getMessages(id) });
+  } catch (err) {
+    console.error('[/threads/:id/messages] error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/threads/:id', async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id.' });
+  try {
+    const deleted = await deleteThread(id);
     res.json({ deleted });
   } catch (err) {
     console.error('[DELETE /threads/:id] error:', err);
@@ -792,7 +791,7 @@ app.post('/summarize', async (req, res) => {
     if (resumeId) {
       const id = Number(resumeId);
       if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid resumeId.' });
-      const resume = getResume(id);
+      const resume = await getResume(id);
       if (!resume) return res.status(404).json({ error: 'Resume not found.' });
       const cached = resume.review?.summary;
       if (cached && cached.trim()) {
@@ -851,84 +850,7 @@ async function saveAttachment(buffer, filename, contentType) {
   return join('uploads', unique).replace(/\\/g, '/');
 }
 
-// Walk every SQLite row in the dual-written tables and upsert it into Mongo.
-// Idempotent. Bulk-writes per collection to keep the round-trip count small.
-// Decodes JSON-string columns into nested objects so the Mongo docs are
-// queryable (e.g. resumes.top_skills becomes a real array, not a string).
-async function backfillMongo(mdb) {
-  const db = getDb();
-  const counts = {};
-
-  const safeJson = (s) => {
-    if (!s) return null;
-    try { return JSON.parse(s); } catch { return null; }
-  };
-  const bulkUpsert = async (collection, docs) => {
-    if (!docs.length) { counts[collection] = 0; return; }
-    const ops = docs.map((doc) => ({
-      replaceOne: { filter: { _id: doc._id }, replacement: doc, upsert: true }
-    }));
-    const result = await mdb.collection(collection).bulkWrite(ops, { ordered: false });
-    counts[collection] = (result.upsertedCount || 0) + (result.modifiedCount || 0) + (result.matchedCount || 0);
-  };
-
-  // resumes
-  const resumeRows = db.prepare('SELECT * FROM resumes').all();
-  await bulkUpsert('resumes', resumeRows.map((row) => {
-    const doc = {
-      _id: row.id,
-      ...row,
-      top_skills:     safeJson(row.top_skills) || [],
-      languages:      safeJson(row.languages) || [],
-      work_locations: safeJson(row.work_locations) || [],
-      companies:      safeJson(row.companies) || [],
-      domains:        safeJson(row.domains) || [],
-      education:      safeJson(row.education_json) || [],
-      certifications: safeJson(row.certifications) || [],
-      remote_worked:    row.remote_worked === 1,
-      managed_people:   row.managed_people === 1,
-      open_to_relocate: row.open_to_relocate === 1,
-      publications:     row.publications === 1,
-      review:           safeJson(row.review_json) || null
-    };
-    delete doc.review_json;
-    delete doc.education_json;
-    return doc;
-  }));
-
-  // chat threads + messages
-  await bulkUpsert('chat_threads', db.prepare('SELECT * FROM chat_threads').all()
-    .map((r) => ({ _id: r.id, ...r })));
-  await bulkUpsert('chat_messages', db.prepare('SELECT * FROM chat_messages').all()
-    .map((r) => ({ _id: r.id, ...r })));
-
-  // automation
-  await bulkUpsert('workflows', db.prepare('SELECT * FROM workflows').all().map((r) => ({
-    _id: r.id, ...r, enabled: r.enabled === 1, graph: safeJson(r.graph_json) || {}
-  })).map((d) => { delete d.graph_json; return d; }));
-
-  await bulkUpsert('workflow_runs', db.prepare('SELECT * FROM workflow_runs').all().map((r) => ({
-    _id: r.id, ...r, summary: safeJson(r.summary) || {}
-  })));
-
-  await bulkUpsert('workflow_actions', db.prepare('SELECT * FROM workflow_actions').all().map((r) => ({
-    _id: r.id, ...r, detail: safeJson(r.detail_json) || {}
-  })).map((d) => { delete d.detail_json; return d; }));
-
-  await bulkUpsert('interviewers', db.prepare('SELECT * FROM interviewers').all().map((r) => ({
-    _id: r.id, ...r, availability: safeJson(r.availability_json) || []
-  })).map((d) => { delete d.availability_json; return d; }));
-
-  await bulkUpsert('oa_templates', db.prepare('SELECT * FROM oa_templates').all()
-    .map((r) => ({ _id: r.id, ...r })));
-
-  // KV: use the key as _id so the partial unique index in mongo lines up.
-  await bulkUpsert('automation_kv', db.prepare('SELECT * FROM automation_kv').all().map((r) => ({
-    _id: r.k, k: r.k, v: safeJson(r.v) ?? r.v, updated_at: r.updated_at
-  })));
-
-  return counts;
-}
+// (The one-time SQLite -> Mongo importer now lives in migrate-to-mongo.js.)
 
 // First non-empty line, capped. Resumes typically start with the candidate's
 // name. Falls back to null if the line looks too long or noisy.
@@ -947,42 +869,46 @@ function guessCandidateName(text) {
 // ---------------------------------------------------------------------------
 // Automation builder — workflows, runs, integrations, interviewers, templates
 
-app.get('/automation/workflows', (_req, res) => {
-  try { res.json({ workflows: listWorkflows() }); }
+app.get('/automation/workflows', async (_req, res) => {
+  try { res.json({ workflows: await listWorkflows() }); }
   catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.get('/automation/workflows/:id', (req, res) => {
+app.get('/automation/workflows/:id', async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id.' });
-  const wf = getWorkflow(id);
-  if (!wf) return res.status(404).json({ error: 'Workflow not found.' });
-  res.json(wf);
+  try {
+    const wf = await getWorkflow(id);
+    if (!wf) return res.status(404).json({ error: 'Workflow not found.' });
+    res.json(wf);
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.post('/automation/workflows', (req, res) => {
+app.post('/automation/workflows', async (req, res) => {
   const { name, description, graph } = req.body || {};
   if (!name || typeof name !== 'string') return res.status(400).json({ error: 'Missing workflow name.' });
   try {
-    const id = createWorkflow({ name, description, graph });
-    res.json({ id, workflow: getWorkflow(id) });
+    const id = await createWorkflow({ name, description, graph });
+    res.json({ id, workflow: await getWorkflow(id) });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.put('/automation/workflows/:id', (req, res) => {
+app.put('/automation/workflows/:id', async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id.' });
   try {
-    const ok = updateWorkflow(id, req.body || {});
+    const ok = await updateWorkflow(id, req.body || {});
     if (!ok) return res.status(404).json({ error: 'Workflow not found.' });
-    res.json({ ok: true, workflow: getWorkflow(id) });
+    res.json({ ok: true, workflow: await getWorkflow(id) });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.delete('/automation/workflows/:id', (req, res) => {
+app.delete('/automation/workflows/:id', async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id.' });
-  res.json({ deleted: deleteWorkflow(id) });
+  try {
+    res.json({ deleted: await deleteWorkflow(id) });
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // Run / dry-run a workflow. Body: { mode, candidateIds?, overrides? }
@@ -999,28 +925,34 @@ app.post('/automation/workflows/:id/run', async (req, res) => {
   }
 });
 
-app.get('/automation/runs', (req, res) => {
-  const workflowId = req.query.workflowId ? Number(req.query.workflowId) : undefined;
-  res.json({ runs: listRuns({ workflowId, limit: 50 }) });
+app.get('/automation/runs', async (req, res) => {
+  try {
+    const workflowId = req.query.workflowId ? Number(req.query.workflowId) : undefined;
+    res.json({ runs: await listRuns({ workflowId, limit: 50 }) });
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.get('/automation/runs/:id', (req, res) => {
+app.get('/automation/runs/:id', async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id.' });
-  const run = getRun(id);
-  if (!run) return res.status(404).json({ error: 'Run not found.' });
-  res.json(run);
+  try {
+    const run = await getRun(id);
+    if (!run) return res.status(404).json({ error: 'Run not found.' });
+    res.json(run);
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // --- Google integration ---
 
-app.get('/automation/google/status', (_req, res) => {
-  res.json({
-    configured: googleConfigured(),
-    connected:  googleConnected(),
-    profile:    googleProfile(),
-    redirectUri: process.env.GOOGLE_REDIRECT_URI || 'http://localhost:8787/automation/google/callback'
-  });
+app.get('/automation/google/status', async (_req, res) => {
+  try {
+    res.json({
+      configured: googleConfigured(),
+      connected:  await googleConnected(),
+      profile:    await googleProfile(),
+      redirectUri: process.env.GOOGLE_REDIRECT_URI || 'http://localhost:8787/automation/google/callback'
+    });
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.get('/automation/google/auth', (_req, res) => {
@@ -1049,9 +981,11 @@ app.get('/automation/google/callback', async (req, res) => {
   }
 });
 
-app.post('/automation/google/disconnect', (_req, res) => {
-  disconnectGoogle();
-  res.json({ ok: true });
+app.post('/automation/google/disconnect', async (_req, res) => {
+  try {
+    await disconnectGoogle();
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // --- Gmail (extension-facing: list + download attachments) ---
@@ -1061,12 +995,14 @@ app.post('/automation/google/disconnect', (_req, res) => {
 // reuse those routes so a user who's already wired up Google for interview
 // scheduling doesn't have to reconnect for Gmail.
 
-app.get('/gmail/status', (_req, res) => {
-  res.json({
-    configured: googleConfigured(),
-    connected:  googleConnected(),
-    profile:    googleProfile()
-  });
+app.get('/gmail/status', async (_req, res) => {
+  try {
+    res.json({
+      configured: googleConfigured(),
+      connected:  await googleConnected(),
+      profile:    await googleProfile()
+    });
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // Same auth URL as /automation/google/auth -- aliased here so the extension
@@ -1076,9 +1012,11 @@ app.get('/gmail/auth', (_req, res) => {
   catch (err) { res.status(400).json({ error: err.message }); }
 });
 
-app.post('/gmail/disconnect', (_req, res) => {
-  disconnectGoogle();
-  res.json({ ok: true });
+app.post('/gmail/disconnect', async (_req, res) => {
+  try {
+    await disconnectGoogle();
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // List resume-shaped attachments in the user's Gmail inbox. Returns the same
@@ -1111,16 +1049,145 @@ app.get('/gmail/attachments/:messageId/:attachmentId', async (req, res) => {
   }
 });
 
+// --- IMAP (custom-domain mailbox) ---------------------------------------
+//
+// Provider-neutral path: read resume attachments out of any mailbox that
+// speaks IMAP (Zoho, Google Workspace, M365, cPanel hosts, ...). Credentials
+// live in the backend (.env or saved config), never the extension.
+
+// Current config minus the password (safe for the dashboard to render).
+app.get('/imap/status', async (_req, res) => {
+  try {
+    res.json(await imapStatus());
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Save host/port/secure/user/pass/mailbox. Blank password keeps the stored one.
+app.post('/imap/config', async (req, res) => {
+  try {
+    const { host, port, secure, user, pass, mailbox } = req.body || {};
+    const status = await setImapConfig({ host, port, secure, user, pass, mailbox });
+    res.json(status);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.post('/imap/disconnect', async (_req, res) => {
+  try {
+    await disconnectImap();
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Verify credentials connect + open the mailbox. Returns { ok, mailbox, messages }.
+app.post('/imap/test', async (_req, res) => {
+  try {
+    const result = await testImapConnection();
+    res.json(result);
+  } catch (err) {
+    console.warn('[/imap/test] error:', err.message);
+    res.status(400).json({ ok: false, error: err.message });
+  }
+});
+
+// Pull the newest messages, extract PDF/DOCX attachments, and run each through
+// the same scoring pipeline as /score. Already-scored attachments hit the cache
+// (keyed by messageId + part index) so re-syncing is cheap and idempotent.
+//   body: { limit?: number=25, sinceDays?: number=0 }
+app.post('/imap/sync', async (req, res) => {
+  if (!(await imapConfigured())) {
+    return res.status(400).json({ error: 'IMAP not configured. Save host/user/password first via /imap/config or .env.' });
+  }
+  const limitRaw = Number(req.body?.limit);
+  const sinceRaw = Number(req.body?.sinceDays);
+  const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 200) : 25;
+  const sinceDays = Number.isFinite(sinceRaw) && sinceRaw > 0 ? sinceRaw : 0;
+
+  try {
+    const found = await fetchImapResumes({ limit, sinceDays });
+
+    const items = [];
+    let scored = 0, duplicates = 0, skipped = 0;
+    for (const it of found) {
+      try {
+        const buffer = Buffer.from(it.contentBase64 || '', 'base64');
+        const r = await processResume({
+          buffer,
+          filename: it.filename,
+          contentType: it.contentType,
+          emailId: it.messageId,
+          attachmentId: it.partId
+        });
+        if (r.cached) duplicates++; else scored++;
+        items.push({
+          filename: it.filename,
+          from: it.from,
+          subject: it.subject,
+          receivedDateTime: it.receivedDateTime,
+          resumeId: r.resumeId,
+          candidateName: r.candidateName,
+          score: r.scored?.score,
+          cached: r.cached
+        });
+      } catch (err) {
+        skipped++;
+        items.push({ filename: it.filename, from: it.from, subject: it.subject, error: err.message });
+      }
+    }
+
+    res.json({ scanned: found.length, scored, duplicates, skipped, items });
+  } catch (err) {
+    console.warn('[/imap/sync] error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// List resume-shaped attachments in the mailbox (metadata only). Same item
+// shape as /gmail/messages so the popup can merge IMAP into the inbox list.
+app.get('/imap/messages', async (req, res) => {
+  if (!(await imapConfigured())) {
+    return res.status(401).json({ error: 'IMAP not configured.' });
+  }
+  const top = Number(req.query.top);
+  try {
+    const items = await listImapResumeEmails({
+      limit: Number.isFinite(top) && top > 0 ? Math.min(top, 200) : 25
+    });
+    res.json({ items });
+  } catch (err) {
+    const status = /not configured|auth/i.test(err.message) ? 401 : 500;
+    console.warn('[/imap/messages] error:', err.message);
+    res.status(status).json({ error: err.message });
+  }
+});
+
+// Download one IMAP attachment by (messageId, partId). Returns the bytes
+// base64-encoded so the popup can POST straight to /score, just like Gmail.
+app.get('/imap/attachments/:messageId/:partId', async (req, res) => {
+  try {
+    const { messageId, partId } = req.params;
+    const att = await downloadImapAttachment(messageId, partId);
+    res.json(att);
+  } catch (err) {
+    const status = /not configured|auth/i.test(err.message) ? 401 : 500;
+    console.warn('[/imap/attachments] error:', err.message);
+    res.status(status).json({ error: err.message });
+  }
+});
+
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
 }
 
 // --- Interviewers ---
 
-app.get('/automation/interviewers', (_req, res) => {
-  res.json({ interviewers: listInterviewers() });
+app.get('/automation/interviewers', async (_req, res) => {
+  try {
+    res.json({ interviewers: await listInterviewers() });
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
-app.post('/automation/interviewers', (req, res) => {
+app.post('/automation/interviewers', async (req, res) => {
   const { name, email, calendarId, timezone } = req.body || {};
   if (!name || !email) return res.status(400).json({ error: 'name and email are required.' });
   // Reject obviously-wrong timezones at write time (e.g. "asia") so Google
@@ -1130,72 +1197,94 @@ app.post('/automation/interviewers', (req, res) => {
       error: `"${timezone}" is not a valid IANA timezone. Examples: "Asia/Kolkata", "America/New_York", "Europe/London".`
     });
   }
-  const id = createInterviewer({ name, email, calendarId, timezone });
-  res.json({ id, interviewers: listInterviewers() });
+  try {
+    const id = await createInterviewer({ name, email, calendarId, timezone });
+    res.json({ id, interviewers: await listInterviewers() });
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
-app.delete('/automation/interviewers/:id', (req, res) => {
-  res.json({ deleted: deleteInterviewer(Number(req.params.id)) });
+app.delete('/automation/interviewers/:id', async (req, res) => {
+  try {
+    res.json({ deleted: await deleteInterviewer(Number(req.params.id)) });
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // Add an availability window. Body: { start: ISO, end: ISO }
-app.post('/automation/interviewers/:id/availability', (req, res) => {
+app.post('/automation/interviewers/:id/availability', async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id.' });
   try {
-    const r = addAvailabilityWindow(id, req.body || {});
-    res.json({ ok: true, ...r, interviewers: listInterviewers() });
+    const r = await addAvailabilityWindow(id, req.body || {});
+    res.json({ ok: true, ...r, interviewers: await listInterviewers() });
   } catch (err) { res.status(400).json({ error: err.message }); }
 });
 
-app.delete('/automation/interviewers/:id/availability/:windowId', (req, res) => {
+app.delete('/automation/interviewers/:id/availability/:windowId', async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id.' });
-  const removed = removeAvailabilityWindow(id, String(req.params.windowId));
-  res.json({ deleted: removed, interviewers: listInterviewers() });
+  try {
+    const removed = await removeAvailabilityWindow(id, String(req.params.windowId));
+    res.json({ deleted: removed, interviewers: await listInterviewers() });
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // --- OA email templates ---
 
-app.get('/automation/templates', (_req, res) => {
-  res.json({ templates: listTemplates() });
+app.get('/automation/templates', async (_req, res) => {
+  try { res.json({ templates: await listTemplates() }); }
+  catch (err) { res.status(500).json({ error: err.message }); }
 });
-app.get('/automation/templates/:id', (req, res) => {
-  const t = getTemplate(Number(req.params.id));
-  if (!t) return res.status(404).json({ error: 'Template not found.' });
-  res.json(t);
+app.get('/automation/templates/:id', async (req, res) => {
+  try {
+    const t = await getTemplate(Number(req.params.id));
+    if (!t) return res.status(404).json({ error: 'Template not found.' });
+    res.json(t);
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
-app.post('/automation/templates', (req, res) => {
+app.post('/automation/templates', async (req, res) => {
   const { name, subject, body, oaLink } = req.body || {};
   if (!name || !subject || !body) return res.status(400).json({ error: 'name, subject, body required.' });
-  const id = createTemplate({ name, subject, body, oaLink });
-  res.json({ id, templates: listTemplates() });
+  try {
+    const id = await createTemplate({ name, subject, body, oaLink });
+    res.json({ id, templates: await listTemplates() });
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
-app.put('/automation/templates/:id', (req, res) => {
-  const ok = updateTemplate(Number(req.params.id), req.body || {});
-  if (!ok) return res.status(404).json({ error: 'Template not found.' });
-  res.json({ ok: true, templates: listTemplates() });
+app.put('/automation/templates/:id', async (req, res) => {
+  try {
+    const ok = await updateTemplate(Number(req.params.id), req.body || {});
+    if (!ok) return res.status(404).json({ error: 'Template not found.' });
+    res.json({ ok: true, templates: await listTemplates() });
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
-app.delete('/automation/templates/:id', (req, res) => {
-  res.json({ deleted: deleteTemplate(Number(req.params.id)) });
+app.delete('/automation/templates/:id', async (req, res) => {
+  try { res.json({ deleted: await deleteTemplate(Number(req.params.id)) }); }
+  catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // ---------------------------------------------------------------------------
 
 const PORT = Number(process.env.PORT) || 8787;
-app.listen(PORT, () => {
-  console.log(`Resume Scorer backend listening on http://localhost:${PORT}`);
-  console.log(`  ai provider:    ${process.env.AI_PROVIDER || 'groq'}`);
-  console.log(`  ai model:       ${process.env.MODEL || '(default)'}`);
-  console.log(`  embed provider: ${process.env.EMBED_PROVIDER || 'google'}`);
-  const ms = mongoStatus();
-  if (!ms.configured) {
-    console.log('  mongo:          (disabled — MONGODB_URI not set in backend/.env)');
-  } else {
-    // Trigger the lazy connect now so misconfigured URIs fail loudly at boot
-    // instead of on the first write.
-    getMongoDb().then((db) => {
-      if (db) console.log(`  mongo:          connected (db="${ms.db}")`);
-      else    console.log('  mongo:          configured but unreachable — dual-write disabled');
+
+// Mongo is the source of truth, so connect (and ensure indexes) BEFORE we start
+// serving. ensureAutomationSchema touches the connection; seedDefaults inserts
+// the starter workflows/template on a fresh DB. A failed connect aborts boot —
+// there's no SQLite fallback anymore.
+async function init() {
+  await getMongoDb();
+  await ensureAutomationSchema();
+  try { await seedDefaults(); } catch (err) { console.warn('[automation] seed failed:', err.message); }
+}
+
+init()
+  .then(() => {
+    app.listen(PORT, () => {
+      console.log(`Resume Scorer backend listening on http://localhost:${PORT}`);
+      console.log(`  ai provider:    ${process.env.AI_PROVIDER || 'groq'}`);
+      console.log(`  ai model:       ${process.env.MODEL || '(default)'}`);
+      console.log(`  embed provider: ${process.env.EMBED_PROVIDER || 'google'}`);
+      console.log(`  mongo:          connected (db="${mongoStatus().db}")`);
     });
-  }
-});
+  })
+  .catch((err) => {
+    console.error('[boot] fatal — could not start (is MONGODB_URI set and reachable?):', err.message);
+    process.exit(1);
+  });

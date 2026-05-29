@@ -11,11 +11,9 @@
 //
 // Rate limiting: Groq free tier is 12k TPM. Each resume burns ~2-3k tokens,
 // so 4-5 resumes/min is the ceiling. The default 8s throttle keeps us under.
-// callGroq() in ai.js also retries on 429 with the suggested delay, so even
-// if we burst slightly we recover automatically.
 
 import 'dotenv/config';
-import { getDb, remirrorResume } from './db.js';
+import { getMongoDb, closeMongo } from './mongo.js';
 import { scoreResume } from './ai.js';
 import { indexResume } from './rag.js';
 
@@ -42,111 +40,72 @@ function hasFlag(name) {
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
-function nullable(v) { return v === undefined || v === '' ? null : v; }
-function jsonOrNull(v) { return Array.isArray(v) ? JSON.stringify(v) : null; }
-function boolToInt(v) { return v === true ? 1 : v === false ? 0 : null; }
-function numOrNull(v) { const n = Number(v); return Number.isFinite(n) ? n : null; }
+const arr  = (x) => (Array.isArray(x) ? x : []);
+const num  = (x) => (Number.isFinite(Number(x)) && x !== null && x !== '' ? Number(x) : null);
+const bool = (x) => x === true;
 
 async function main() {
-  const db = getDb();
+  const db = await getMongoDb();
   const onlyIds = parseOnlyArg();
   const throttleMs = parseFlagInt('throttle', 8000);
   const skipReindex = hasFlag('skip-reindex');
   console.log(`[rescore] throttle=${throttleMs}ms skip-reindex=${skipReindex}`);
 
-  let rows;
-  if (onlyIds && onlyIds.length) {
-    const ph = onlyIds.map(() => '?').join(',');
-    rows = db.prepare(`SELECT id, candidate_name, filename, raw_text FROM resumes WHERE id IN (${ph}) ORDER BY id`).all(...onlyIds);
-  } else {
-    rows = db.prepare('SELECT id, candidate_name, filename, raw_text FROM resumes ORDER BY id').all();
-  }
+  const filter = (onlyIds && onlyIds.length) ? { _id: { $in: onlyIds } } : {};
+  const rows = await db.collection('resumes')
+    .find(filter, { projection: { _id: 0, id: 1, candidate_name: 1, filename: 1, raw_text: 1 } })
+    .sort({ id: 1 })
+    .toArray();
 
   console.log(`[rescore] processing ${rows.length} resumes...`);
 
-  // Direct UPDATE -- insertResume's existing-row path requires email/attachment
-  // ids which not every row has. Keeping this inline so the script is
-  // self-contained and obviously matches the new schema columns.
-  const update = db.prepare(`
-    UPDATE resumes SET
-      score             = ?,
-      category          = ?,
-      role_title        = ?,
-      review_json       = ?,
-      candidate_name    = COALESCE(?, candidate_name),
-      email             = COALESCE(?, email),
-      phone             = COALESCE(?, phone),
-      location          = COALESCE(?, location),
-      linkedin          = COALESCE(?, linkedin),
-      github            = COALESCE(?, github),
-      portfolio         = COALESCE(?, portfolio),
-      current_title     = COALESCE(?, current_title),
-      current_company   = COALESCE(?, current_company),
-      years_experience  = COALESCE(?, years_experience),
-      highest_education = COALESCE(?, highest_education),
-      top_skills        = COALESCE(?, top_skills),
-      languages         = COALESCE(?, languages),
-      notice_period     = COALESCE(?, notice_period),
-      expected_salary   = COALESCE(?, expected_salary),
-      work_locations    = ?,
-      companies         = ?,
-      domains           = ?,
-      remote_worked     = ?,
-      remote_years      = ?,
-      remote_evidence   = ?,
-      managed_people    = ?,
-      team_size_managed = ?,
-      open_to_relocate  = ?,
-      education_json    = ?,
-      certifications    = ?,
-      publications      = ?
-    WHERE id = ?
-  `);
-
   let ok = 0, fail = 0;
-  for (const r of rows) {
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i];
     const t0 = Date.now();
     try {
       const scored = await scoreResume(r.raw_text);
       const c = scored.candidate || {};
       const rem = c.remoteExperience || {};
 
-      update.run(
-        Number.isFinite(scored.score) ? scored.score : null,
-        scored.category || null,
-        scored.roleTitle || null,
-        JSON.stringify(scored),
-        nullable(c.name),
-        nullable(c.email), nullable(c.phone), nullable(c.location),
-        nullable(c.linkedin), nullable(c.github), nullable(c.portfolio),
-        nullable(c.currentTitle), nullable(c.currentCompany),
-        Number.isFinite(c.yearsExperience) ? c.yearsExperience : null,
-        nullable(c.highestEducation),
-        jsonOrNull(c.topSkills), jsonOrNull(c.languages),
-        nullable(c.noticePeriod), nullable(c.expectedSalary),
-        jsonOrNull(c.workLocations),
-        jsonOrNull(c.companies),
-        jsonOrNull(c.domains),
-        boolToInt(rem.worked),
-        numOrNull(rem.years),
-        nullable(rem.evidence),
-        boolToInt(c.managedPeople),
-        numOrNull(c.teamSizeManaged),
-        boolToInt(c.openToRelocate),
-        jsonOrNull(c.education),
-        jsonOrNull(c.certifications),
-        boolToInt(c.publications),
-        r.id
-      );
+      // Always-overwrite fields (score, classification, review, L2 structured).
+      const $set = {
+        score: Number.isFinite(scored.score) ? scored.score : null,
+        category: scored.category || null,
+        role_title: scored.roleTitle || null,
+        review: scored,
+        work_locations: arr(c.workLocations),
+        companies: arr(c.companies),
+        domains: arr(c.domains),
+        remote_worked: bool(rem.worked),
+        remote_years: num(rem.years),
+        remote_evidence: rem.evidence ? String(rem.evidence) : null,
+        managed_people: bool(c.managedPeople),
+        team_size_managed: num(c.teamSizeManaged),
+        open_to_relocate: bool(c.openToRelocate),
+        education: arr(c.education),
+        certifications: arr(c.certifications),
+        publications: bool(c.publications)
+      };
+      // COALESCE fields: only overwrite when the new value is present.
+      const coalesce = {
+        candidate_name: c.name, email: c.email, phone: c.phone, location: c.location,
+        linkedin: c.linkedin, github: c.github, portfolio: c.portfolio,
+        current_title: c.currentTitle, current_company: c.currentCompany,
+        years_experience: Number.isFinite(c.yearsExperience) ? c.yearsExperience : undefined,
+        highest_education: c.highestEducation,
+        top_skills: Array.isArray(c.topSkills) ? c.topSkills : undefined,
+        languages: Array.isArray(c.languages) ? c.languages : undefined,
+        notice_period: c.noticePeriod, expected_salary: c.expectedSalary
+      };
+      for (const [k, v] of Object.entries(coalesce)) {
+        if (v !== undefined && v !== null && v !== '') $set[k] = v;
+      }
 
-      // Push the refreshed row into Mongo too. Dual-write happens automatically
-      // for insertResume, but this script uses a direct UPDATE so we mirror
-      // explicitly. No-op when MONGODB_URI is unset.
-      remirrorResume(r.id);
+      await db.collection('resumes').updateOne({ _id: r.id }, { $set });
 
-      // Re-index chunks too unless skipped. raw_text didn't change, so this
-      // is mostly to ensure FTS5 is populated for resumes scored before FTS
-      // was added. Skip with --skip-reindex if you've already done it once.
+      // Re-index chunks unless skipped (raw_text unchanged, but ensures the
+      // Mongo chunks + Pinecone vectors exist for older rows).
       if (!skipReindex) {
         try {
           await indexResume(r.id, r.raw_text);
@@ -163,13 +122,12 @@ async function main() {
       fail++;
     }
 
-    // Throttle between calls to stay under Groq's TPM budget. Skip the
-    // final sleep since the loop is about to exit.
-    if (throttleMs > 0 && rows.indexOf(r) < rows.length - 1) {
+    if (throttleMs > 0 && i < rows.length - 1) {
       await sleep(throttleMs);
     }
   }
 
+  await closeMongo();
   console.log(`[rescore] done. ok=${ok} fail=${fail} total=${rows.length}`);
 }
 

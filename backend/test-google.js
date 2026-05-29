@@ -6,17 +6,12 @@
 
 import 'dotenv/config';
 import { getAccessToken, findNextFreeSlot, createMeetEvent, sendGmail, googleProfile } from './google.js';
-import { getDb } from './db.js';
-import { ensureAutomationSchema } from './automationDb.js';
-
-getDb();
-ensureAutomationSchema();
 
 const args = new Set(process.argv.slice(2));
 const wantSendTest = args.has('--send-test');     // creates a real calendar event + email — opt-in!
 
 (async () => {
-  console.log('Profile:', googleProfile());
+  console.log('Profile:', await googleProfile());
 
   // --- access token / Calendar read ---
   const token = await getAccessToken();
@@ -50,14 +45,15 @@ const wantSendTest = args.has('--send-test');     // creates a real calendar eve
   }
 
   // --- create a calendar event with a Meet link, invite self ---
-  const me = googleProfile().email;
+  const prof = await googleProfile();
+  const me = prof.email;
   const event = await createMeetEvent({
     calendarId: 'primary',
     summary: '[Resume Scorer test] Calendar + Meet integration check',
     description: 'Created by test-google.js — feel free to delete.',
     startIso: slot.start,
     endIso:   slot.end,
-    attendees: [{ email: me, displayName: googleProfile().name }]
+    attendees: [{ email: me, displayName: prof.name }]
   });
   console.log('Calendar event created:', event.htmlLink);
   console.log('Google Meet URL:', event.hangoutLink || event.conferenceData?.entryPoints?.[0]?.uri || '(none)');

@@ -5,15 +5,15 @@
 // First call downloads ~25 MB of model weights to ./node_modules/@huggingface
 // (or your HF cache dir). After that it's offline.
 //
-// IMPORTANT: the dimension MUST match EMBED_DIM in db.js (the sqlite-vec
-// virtual table is created with a fixed size). If you switch providers and
-// dimensions change, drop the chunk_vectors table (or delete data.db) and
-// re-index every resume.
+// IMPORTANT: the dimension MUST match the Pinecone index's dimension (fixed at
+// index-creation time). If you switch providers and the dimension changes, set
+// a new PINECONE_INDEX name in .env and run `node reindex.js` to re-embed every
+// resume into the new index.
 
 // Google retired `text-embedding-004` -- the current stable embedder is
 // `gemini-embedding-001`. Its native output is 3072 dims (Matryoshka), and
 // we pass outputDimensionality below to truncate to 768 for compatibility
-// with the existing Pinecone/sqlite-vec schemas.
+// with the Pinecone index dimension.
 const PROVIDER_DEFAULTS = {
   google: { model: 'gemini-embedding-001',       dim: 768 },
   voyage: { model: 'voyage-3-lite',              dim: 512 },
@@ -172,7 +172,7 @@ async function embedLocalBatch(texts) {
   const extractor = await getLocalPipeline();
   // pooling: 'mean' averages token embeddings into a single sentence vector.
   // normalize: 'true' L2-normalizes -- required for cosine distance to behave
-  // identically to dot product, which is what sqlite-vec expects.
+  // identically to dot product (Pinecone's index uses cosine).
   const output = await extractor(texts, { pooling: 'mean', normalize: true });
   const [n, dim] = output.dims;
   const data = output.data; // Float32Array of length n * dim

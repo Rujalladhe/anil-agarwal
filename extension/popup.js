@@ -7,13 +7,23 @@ import {
   gmailStatus, isGmailConnected, connectGmail, disconnectGmail,
   listResumeEmails as listGmailEmails, downloadAttachment as downloadGmailAttachment
 } from './gmail.js';
+import {
+  imapStatus, saveImapConfig, testImap, disconnectImap,
+  listResumeEmails as listImapEmails, downloadAttachment as downloadImapAttachment
+} from './imap.js';
 
-// Source-aware attachment downloader. Items carry `source: 'outlook' | 'gmail'`
-// so the popup can fetch from whichever inbox they came from without the rest
-// of the code caring.
+// Source-aware attachment downloader. Items carry `source: 'outlook' | 'gmail'
+// | 'imap'` so the popup can fetch from whichever inbox they came from without
+// the rest of the code caring.
 async function downloadFor(item) {
   if (item.source === 'gmail') {
     return downloadGmailAttachment(item.messageId, item.attachmentId, {
+      filename: item.filename,
+      contentType: item.contentType
+    });
+  }
+  if (item.source === 'imap') {
+    return downloadImapAttachment(item.messageId, item.partId, {
       filename: item.filename,
       contentType: item.contentType
     });
@@ -64,22 +74,29 @@ function fmtDate(iso) {
 
 // -------- Top-level views -------------------------------------------------
 // Tracks which inboxes are currently connected. Updated by refreshConnectionStatus().
-const connected = { outlook: false, gmail: false };
+const connected = { outlook: false, gmail: false, imap: false };
+// Last-seen IMAP status (host/user/mailbox) so we can prefill the settings form.
+let lastImapStatus = {};
 
 async function refreshConnectionStatus() {
-  const [out, gm] = await Promise.all([
+  const [out, gm, im] = await Promise.all([
     outlookLoggedIn().catch(() => false),
-    gmailStatus().catch(() => ({ connected: false }))
+    gmailStatus().catch(() => ({ connected: false })),
+    imapStatus().catch(() => ({ configured: false }))
   ]);
   connected.outlook = !!out;
   connected.gmail = !!gm.connected;
+  connected.imap = !!im.configured;
+  lastImapStatus = im || {};
 
   // Auth panel rows: show "Connected as ..." vs "Not connected", and flip
   // the row class so connected ones get the sage tint.
   const outlookRow = document.querySelector('[data-provider="outlook"]');
   const gmailRow   = document.querySelector('[data-provider="gmail"]');
+  const imapRow    = document.querySelector('[data-provider="imap"]');
   if (outlookRow) outlookRow.classList.toggle('connected', connected.outlook);
   if (gmailRow)   gmailRow.classList.toggle('connected',   connected.gmail);
+  if (imapRow)    imapRow.classList.toggle('connected',    connected.imap);
 
   setText('outlookStatus', connected.outlook ? 'Connected' : 'Not connected');
   setText('gmailStatus',
@@ -88,16 +105,28 @@ async function refreshConnectionStatus() {
       : (gm.configured === false
           ? 'Backend missing Google OAuth credentials'
           : 'Not connected'));
+  setText('imapStatus',
+    connected.imap
+      ? `Connected · ${im.user || ''}${im.host ? '@' + im.host : ''}`
+      : 'Not connected');
 
   // Flip the buttons between "Connect" and "Disconnect" based on state.
   const outBtn = $('connectOutlookBtn');
   const gmBtn  = $('connectGmailBtn');
+  const imBtn  = $('connectImapBtn');
   outBtn.textContent = connected.outlook ? 'Disconnect' : 'Connect';
   outBtn.classList.toggle('primary', false);
   outBtn.classList.toggle('secondary', true);
   gmBtn.textContent  = connected.gmail   ? 'Disconnect' : 'Connect';
   gmBtn.classList.toggle('primary', false);
   gmBtn.classList.toggle('secondary', true);
+  if (imBtn) {
+    // When connected, the button disconnects. When not, it toggles the form
+    // open/closed (label handled in the click handler so it reflects the form).
+    imBtn.textContent = connected.imap ? 'Disconnect' : 'Connect';
+    imBtn.classList.toggle('primary', false);
+    imBtn.classList.toggle('secondary', true);
+  }
   // Gmail connect is meaningless when the backend doesn't have client creds.
   if (gm.configured === false && !connected.gmail) {
     gmBtn.disabled = true;
@@ -112,7 +141,7 @@ async function refreshConnectionStatus() {
 
 async function renderInitial() {
   await refreshConnectionStatus();
-  const anyConnected = connected.outlook || connected.gmail;
+  const anyConnected = connected.outlook || connected.gmail || connected.imap;
 
   if (anyConnected) {
     hide('authPanel');
@@ -144,7 +173,9 @@ async function saveClassifyCache(cache) {
 }
 function cacheKey(item) {
   // Prefix with source so a Gmail attId can't ever collide with an Outlook one.
-  return `${item.source || 'outlook'}|${item.attachmentId}|${item.size}`;
+  // IMAP addresses attachments by partId rather than attachmentId.
+  const attRef = item.attachmentId ?? item.partId;
+  return `${item.source || 'outlook'}|${attRef}|${item.size}`;
 }
 
 // -------- Inbox listing ---------------------------------------------------
@@ -161,10 +192,11 @@ async function refreshInbox() {
   const sources = [];
   if (connected.outlook) sources.push('Outlook');
   if (connected.gmail)   sources.push('Gmail');
+  if (connected.imap)    sources.push('IMAP');
   setLoading(true, `Scanning ${sources.join(' + ') || 'inboxes'} for attachments…`);
 
-  // Pull both inboxes in parallel; surface each one's error independently so
-  // a Gmail outage doesn't block Outlook results (and vice versa).
+  // Pull every connected inbox in parallel; surface each one's error
+  // independently so one inbox's outage doesn't block the others.
   const tasks = [];
   if (connected.outlook) tasks.push(listOutlookEmails().then(
     (r) => ({ ok: true, source: 'outlook', items: r }),
@@ -173,6 +205,10 @@ async function refreshInbox() {
   if (connected.gmail) tasks.push(listGmailEmails().then(
     (r) => ({ ok: true, source: 'gmail', items: r }),
     (err) => ({ ok: false, source: 'gmail', err })
+  ));
+  if (connected.imap) tasks.push(listImapEmails().then(
+    (r) => ({ ok: true, source: 'imap', items: r }),
+    (err) => ({ ok: false, source: 'imap', err })
   ));
 
   const results = await Promise.all(tasks);
@@ -262,7 +298,7 @@ function buildCard(item) {
   card.className = 'resume-card';
   card.dataset.cacheKey = cacheKey(item);
   card.dataset.messageId = item.messageId;
-  card.dataset.attachmentId = item.attachmentId;
+  card.dataset.attachmentId = item.attachmentId ?? item.partId ?? '';
 
   card.innerHTML = `
     <div class="card-top">
@@ -288,7 +324,7 @@ function buildCard(item) {
   // came from when they've connected both.
   const src = item.source || 'outlook';
   const srcEl = card.querySelector('.badge-source');
-  srcEl.textContent = src === 'gmail' ? 'Gmail' : 'Outlook';
+  srcEl.textContent = src === 'gmail' ? 'Gmail' : src === 'imap' ? 'IMAP' : 'Outlook';
   srcEl.classList.add(src);
 
   const sumBtn = card.querySelector('.btn-summarize');
@@ -750,6 +786,105 @@ $('connectGmailBtn').addEventListener('click', async () => {
   }
 });
 
+// -------- IMAP (custom domain) connect ------------------------------------
+
+function setImapFormVisible(visible) {
+  const form = $('imapForm');
+  form.classList.toggle('hidden', !visible);
+  if (visible) {
+    // Prefill from the backend's saved (password-less) status. Leave the
+    // password blank — the backend keeps the stored one if we send it empty.
+    $('imapHost').value    = lastImapStatus.host || '';
+    $('imapPort').value    = lastImapStatus.port || 993;
+    $('imapSecure').checked = lastImapStatus.secure !== false;
+    $('imapUser').value    = lastImapStatus.user || '';
+    $('imapMailbox').value = lastImapStatus.mailbox || 'INBOX';
+    $('imapPass').value    = '';
+    setText('imapFormMsg', '');
+    $('imapHost').focus();
+  }
+  // Reflect open/closed on the row button when not connected.
+  if (!connected.imap) $('connectImapBtn').textContent = visible ? 'Cancel' : 'Connect';
+}
+
+function readImapForm() {
+  const host = $('imapHost').value.trim();
+  const portRaw = $('imapPort').value.trim();
+  return {
+    host,
+    port: portRaw ? Number(portRaw) : 993,
+    secure: $('imapSecure').checked,
+    user: $('imapUser').value.trim(),
+    pass: $('imapPass').value,           // may be blank -> backend keeps stored
+    mailbox: $('imapMailbox').value.trim() || 'INBOX'
+  };
+}
+
+function imapFormMsg(text, isError = false) {
+  const el = $('imapFormMsg');
+  el.textContent = text;
+  el.classList.toggle('error', isError);
+}
+
+// Row button: disconnect when connected, otherwise toggle the settings form.
+$('connectImapBtn').addEventListener('click', async () => {
+  clearAuthError();
+  if (connected.imap) {
+    const btn = $('connectImapBtn');
+    btn.disabled = true;
+    try {
+      await disconnectImap();
+      setImapFormVisible(false);
+      await refreshConnectionStatus();
+      await renderInitial();
+    } catch (err) {
+      showAuthError(err.message || 'Could not disconnect IMAP.');
+    } finally {
+      btn.disabled = false;
+    }
+  } else {
+    setImapFormVisible($('imapForm').classList.contains('hidden'));
+  }
+});
+
+// Test button: save the current settings, then verify they connect.
+$('imapTestBtn').addEventListener('click', async () => {
+  const cfg = readImapForm();
+  if (!cfg.host || !cfg.user) { imapFormMsg('Host and email/username are required.', true); return; }
+  const btn = $('imapTestBtn');
+  btn.disabled = true;
+  imapFormMsg('Testing connection…');
+  try {
+    await saveImapConfig(cfg);
+    const r = await testImap();
+    imapFormMsg(`Connected — ${r.messages ?? '?'} message(s) in ${r.mailbox || cfg.mailbox}.`);
+  } catch (err) {
+    imapFormMsg(err.message || 'Connection failed.', true);
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+// Connect (form submit): save, verify, then advance into the inbox.
+$('imapForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const cfg = readImapForm();
+  if (!cfg.host || !cfg.user) { imapFormMsg('Host and email/username are required.', true); return; }
+  const btn = $('imapSaveBtn');
+  btn.disabled = true;
+  imapFormMsg('Connecting…');
+  try {
+    await saveImapConfig(cfg);
+    await testImap();                    // fail fast on bad credentials
+    setImapFormVisible(false);
+    await renderInitial();
+  } catch (err) {
+    imapFormMsg(err.message || 'Could not connect.', true);
+  } finally {
+    btn.disabled = false;
+  }
+});
+
 // Optional "Continue" button -- shown once at least one inbox is connected so
 // the user can advance without waiting for the Gmail polling loop above.
 $('continueBtn').addEventListener('click', async () => {
@@ -763,7 +898,7 @@ $('manageConnectionsBtn').addEventListener('click', async () => {
   hide('mainPanel');
   // If at least one inbox is connected, surface the Continue button so they
   // can return to the inbox view without reconnecting.
-  if (connected.outlook || connected.gmail) show('continueBtn');
+  if (connected.outlook || connected.gmail || connected.imap) show('continueBtn');
 });
 
 $('refreshBtn').addEventListener('click', async () => {
@@ -798,7 +933,8 @@ $('signOutBtn').addEventListener('click', async () => {
   // Disconnect every connected inbox. Each call is best-effort.
   await Promise.allSettled([
     outlookClearTokens(),
-    connected.gmail ? disconnectGmail() : Promise.resolve()
+    connected.gmail ? disconnectGmail() : Promise.resolve(),
+    connected.imap ? disconnectImap() : Promise.resolve()
   ]);
   await renderInitial();
 });

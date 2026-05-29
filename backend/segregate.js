@@ -60,7 +60,7 @@ export async function segregateResumes(jds, { threshold = 30, poolPerJd } = {}) 
     return { buckets: [], unmatched: [], jdCount: prepared.length, resumeCount: 0, validJdCount: 0 };
   }
 
-  const resumes = listResumes();
+  const resumes = await listResumes();
   const resumeMeta = new Map(resumes.map((r) => [r.id, r]));
   // Scale the per-JD pool with how many resumes are in the pipeline so a
   // tail-end candidate doesn't get dropped just because the default top-60

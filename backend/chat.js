@@ -62,16 +62,16 @@ export async function chat({ threadId, resumeId, message }) {
   // 1. Resolve or create the thread.
   let thread;
   if (threadId) {
-    thread = getThread(threadId);
+    thread = await getThread(threadId);
     if (!thread) throw new Error(`Thread ${threadId} not found.`);
   } else {
-    const newId = createThread({ resumeId: resumeId || null, title: null });
-    thread = getThread(newId);
+    const newId = await createThread({ resumeId: resumeId || null, title: null });
+    thread = await getThread(newId);
   }
 
   // 2. Persist the user message before doing any AI work, so it's saved
   //    even if the model call fails.
-  appendMessage({ threadId: thread.id, role: 'user', content: message });
+  await appendMessage({ threadId: thread.id, role: 'user', content: message });
 
   // 3. Build the context block (full resume + retrieved chunks, OR cross-resume RAG).
   const contextBlock = thread.resume_id
@@ -79,7 +79,7 @@ export async function chat({ threadId, resumeId, message }) {
     : await buildCrossResumeContext({ query: message });
 
   // 4. Load the chat history (excluding the just-saved user message; we'll add it explicitly).
-  const history = getMessages(thread.id, { limit: MAX_HISTORY_TURNS * 2 });
+  const history = await getMessages(thread.id, { limit: MAX_HISTORY_TURNS * 2 });
   const priorMessages = history
     .slice(0, -1)  // drop the user message we just appended
     .map((m) => ({ role: m.role, content: m.content }));
@@ -95,11 +95,11 @@ export async function chat({ threadId, resumeId, message }) {
   const answer = await callChatModel({ system: SYSTEM_PROMPT, messages });
 
   // 6. Persist the assistant message.
-  appendMessage({ threadId: thread.id, role: 'assistant', content: answer });
+  await appendMessage({ threadId: thread.id, role: 'assistant', content: answer });
 
   // 7. Auto-title the thread off the first user message.
   if (!thread.title) {
-    setThreadTitle(thread.id, message.slice(0, 80));
+    await setThreadTitle(thread.id, message.slice(0, 80));
   }
 
   return { threadId: thread.id, answer };
@@ -119,21 +119,21 @@ export async function chatStream({ threadId, resumeId, message }, callbacks = {}
 
   let thread;
   if (threadId) {
-    thread = getThread(threadId);
+    thread = await getThread(threadId);
     if (!thread) throw new Error(`Thread ${threadId} not found.`);
   } else {
-    const newId = createThread({ resumeId: resumeId || null, title: null });
-    thread = getThread(newId);
+    const newId = await createThread({ resumeId: resumeId || null, title: null });
+    thread = await getThread(newId);
   }
   try { onMeta && onMeta({ threadId: thread.id }); } catch { /* */ }
 
-  appendMessage({ threadId: thread.id, role: 'user', content: message });
+  await appendMessage({ threadId: thread.id, role: 'user', content: message });
 
   const contextBlock = thread.resume_id
     ? await buildPerResumeContext({ resumeId: thread.resume_id, query: message })
     : await buildCrossResumeContext({ query: message });
 
-  const history = getMessages(thread.id, { limit: MAX_HISTORY_TURNS * 2 });
+  const history = await getMessages(thread.id, { limit: MAX_HISTORY_TURNS * 2 });
   const priorMessages = history
     .slice(0, -1)
     .map((m) => ({ role: m.role, content: m.content }));
@@ -151,8 +151,8 @@ export async function chatStream({ threadId, resumeId, message }, callbacks = {}
     try { onToken && onToken(token); } catch { /* ignore consumer-side throw */ }
   }
 
-  appendMessage({ threadId: thread.id, role: 'assistant', content: answer });
-  if (!thread.title) setThreadTitle(thread.id, message.slice(0, 80));
+  await appendMessage({ threadId: thread.id, role: 'assistant', content: answer });
+  if (!thread.title) await setThreadTitle(thread.id, message.slice(0, 80));
 
   return { threadId: thread.id, answer };
 }
@@ -161,7 +161,7 @@ export async function chatStream({ threadId, resumeId, message }, callbacks = {}
 // Context builders
 
 async function buildPerResumeContext({ resumeId, query }) {
-  const resume = getResume(resumeId);
+  const resume = await getResume(resumeId);
   if (!resume) throw new Error(`Resume ${resumeId} not found.`);
 
   // L4: hybrid retrieval (vectors + BM25 + RRF). For a single resume with a
@@ -191,7 +191,7 @@ async function buildPerResumeContext({ resumeId, query }) {
 }
 
 async function buildCrossResumeContext({ query }) {
-  const all = getAllResumesForChat();
+  const all = await getAllResumesForChat();
   if (all.length === 0) {
     return '(No resumes have been scored yet. Tell the user to score some resumes first.)';
   }
@@ -208,7 +208,7 @@ async function buildCrossResumeContext({ query }) {
   // ("Boston", "remote", "fintech", names of schools, etc.).
   let candidateRows = [];
   try {
-    candidateRows = searchResumes({ ...filters, q: query, limit: 30 });
+    candidateRows = await searchResumes({ ...filters, q: query, limit: 30 });
   } catch (err) {
     console.warn('[chat] searchResumes failed:', err.message);
   }
@@ -247,7 +247,7 @@ async function buildCrossResumeContext({ query }) {
   // means the model sees workLocations, remote flags, companies, domains,
   // managed-people flag, etc. for every candidate in the context, even when
   // those facts weren't in the retrieved chunks.
-  const profiles = getResumeProfiles(resumeIds);
+  const profiles = await getResumeProfiles(resumeIds);
 
   const candidateBlocks = profiles.map((p) => {
     const header  = formatResumeHeader(p);

@@ -1,393 +1,269 @@
-// Automation-builder persistence. Lives next to db.js so it can reuse the same
-// better-sqlite3 connection. Tables:
+// Automation-builder persistence (MongoDB). Collections:
 //
-//   workflows         — saved automation graphs (nodes + edges as JSON)
-//   workflow_runs     — one row per execution
-//   workflow_actions  — one row per (run, candidate, action node) execution result
+//   workflows         — saved automation graphs (nodes + edges as a nested object)
+//   workflow_runs     — one doc per execution
+//   workflow_actions  — one doc per (run, candidate, action node) execution result
 //   automation_kv     — key/value for tokens (Google OAuth) + provider settings
+//                       (_id = the string key)
 //   interviewers      — saved interview panel members + their calendar id
 //   oa_templates      — reusable OA email bodies (Mustache-ish placeholders)
+//
+// All exported functions are async. Numeric ids come from nextId().
 
-import { getDb } from './db.js';
-import {
-  mongoUpsertById, mongoUpdateById, mongoDeleteById, mongoDeleteMany,
-  mongoKvSet, mongoKvDel
-} from './mongo.js';
+import { getMongoDb, nextId } from './mongo.js';
 
-export function ensureAutomationSchema() {
-  const db = getDb();
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS workflows (
-      id           INTEGER PRIMARY KEY AUTOINCREMENT,
-      name         TEXT NOT NULL,
-      description  TEXT,
-      graph_json   TEXT NOT NULL,
-      enabled      INTEGER NOT NULL DEFAULT 1,
-      created_at   INTEGER NOT NULL,
-      updated_at   INTEGER NOT NULL
-    );
-
-    CREATE TABLE IF NOT EXISTS workflow_runs (
-      id           INTEGER PRIMARY KEY AUTOINCREMENT,
-      workflow_id  INTEGER REFERENCES workflows(id) ON DELETE CASCADE,
-      mode         TEXT NOT NULL,        -- 'live' | 'dry-run'
-      status       TEXT NOT NULL,        -- 'running' | 'ok' | 'partial' | 'error'
-      summary      TEXT,                 -- JSON: counters, totals
-      started_at   INTEGER NOT NULL,
-      finished_at  INTEGER
-    );
-
-    CREATE TABLE IF NOT EXISTS workflow_actions (
-      id           INTEGER PRIMARY KEY AUTOINCREMENT,
-      run_id       INTEGER NOT NULL REFERENCES workflow_runs(id) ON DELETE CASCADE,
-      resume_id    INTEGER,
-      candidate    TEXT,
-      node_id      TEXT NOT NULL,
-      node_type    TEXT NOT NULL,
-      status       TEXT NOT NULL,         -- 'ok' | 'skipped' | 'error' | 'preview'
-      detail_json  TEXT,
-      created_at   INTEGER NOT NULL
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_wfa_run ON workflow_actions(run_id);
-
-    CREATE TABLE IF NOT EXISTS automation_kv (
-      k            TEXT PRIMARY KEY,
-      v            TEXT NOT NULL,
-      updated_at   INTEGER NOT NULL
-    );
-
-    CREATE TABLE IF NOT EXISTS interviewers (
-      id                INTEGER PRIMARY KEY AUTOINCREMENT,
-      name              TEXT NOT NULL,
-      email             TEXT NOT NULL,
-      calendar_id       TEXT,                  -- defaults to "primary"
-      timezone          TEXT,                  -- IANA tz, e.g. "Asia/Kolkata"
-      availability_json TEXT,                  -- JSON array of {id,start,end} windows
-      created_at        INTEGER NOT NULL
-    );
-
-    CREATE TABLE IF NOT EXISTS oa_templates (
-      id           INTEGER PRIMARY KEY AUTOINCREMENT,
-      name         TEXT NOT NULL,
-      subject      TEXT NOT NULL,
-      body         TEXT NOT NULL,
-      oa_link      TEXT,                  -- shared default OA link
-      created_at   INTEGER NOT NULL,
-      updated_at   INTEGER NOT NULL
-    );
-  `);
-
-  // Migration: older DBs had `interviewers` without availability_json. Add it.
-  const cols = db.prepare("PRAGMA table_info(interviewers)").all();
-  if (!cols.some((c) => c.name === 'availability_json')) {
-    db.exec(`ALTER TABLE interviewers ADD COLUMN availability_json TEXT`);
-  }
+// Indexes are created on connect (mongo.js ensureIndexes). This just touches the
+// connection so a misconfigured Mongo fails loud at startup.
+export async function ensureAutomationSchema() {
+  await getMongoDb();
 }
 
 // --- key/value -----------------------------------------------------------
 
-export function kvGet(k) {
-  const row = getDb().prepare('SELECT v FROM automation_kv WHERE k = ?').get(k);
-  if (!row) return null;
-  try { return JSON.parse(row.v); } catch { return row.v; }
+export async function kvGet(k) {
+  const db = await getMongoDb();
+  const row = await db.collection('automation_kv').findOne({ _id: k });
+  return row ? (row.v ?? null) : null;
 }
 
-export function kvSet(k, value) {
-  const v = typeof value === 'string' ? value : JSON.stringify(value);
-  getDb().prepare(`
-    INSERT INTO automation_kv (k, v, updated_at) VALUES (?, ?, ?)
-    ON CONFLICT(k) DO UPDATE SET v=excluded.v, updated_at=excluded.updated_at
-  `).run(k, v, Date.now());
-  // Mirror to Mongo. Store the decoded value (object/array) rather than the
-  // JSON string so it's queryable inside Mongo's shell / Atlas UI.
-  mongoKvSet(k, value);
+export async function kvSet(k, value) {
+  const db = await getMongoDb();
+  await db.collection('automation_kv').replaceOne(
+    { _id: k },
+    { _id: k, k, v: value, updated_at: Date.now() },
+    { upsert: true }
+  );
 }
 
-export function kvDel(k) {
-  getDb().prepare('DELETE FROM automation_kv WHERE k = ?').run(k);
-  mongoKvDel(k);
+export async function kvDel(k) {
+  const db = await getMongoDb();
+  await db.collection('automation_kv').deleteOne({ _id: k });
 }
 
 // --- workflows -----------------------------------------------------------
 
 const DEFAULT_GRAPH = () => ({
   nodes: [
-    { id: 'trigger-1', type: 'trigger.manual', x: 80,  y: 200, config: {} }
+    { id: 'trigger-1', type: 'trigger.manual', x: 80, y: 200, config: {} }
   ],
   edges: []
 });
 
-export function listWorkflows() {
-  return getDb().prepare(`
-    SELECT id, name, description, enabled, created_at, updated_at
-    FROM workflows ORDER BY updated_at DESC
-  `).all();
+export async function listWorkflows() {
+  const db = await getMongoDb();
+  return db.collection('workflows')
+    .find({}, { projection: { _id: 0, id: 1, name: 1, description: 1, enabled: 1, created_at: 1, updated_at: 1 } })
+    .sort({ updated_at: -1 })
+    .toArray();
 }
 
-export function getWorkflow(id) {
-  const row = getDb().prepare('SELECT * FROM workflows WHERE id = ?').get(id);
+export async function getWorkflow(id) {
+  const db = await getMongoDb();
+  const row = await db.collection('workflows').findOne({ _id: Number(id) });
   if (!row) return null;
-  let graph;
-  try { graph = JSON.parse(row.graph_json); }
-  catch { graph = DEFAULT_GRAPH(); }
-  return { ...row, enabled: row.enabled === 1, graph };
+  return { ...row, enabled: row.enabled !== false, graph: row.graph || DEFAULT_GRAPH() };
 }
 
-export function createWorkflow({ name, description = '', graph = DEFAULT_GRAPH() }) {
+export async function createWorkflow({ name, description = '', graph = DEFAULT_GRAPH() }) {
+  const db = await getMongoDb();
+  const id = await nextId('workflows');
   const now = Date.now();
-  const info = getDb().prepare(`
-    INSERT INTO workflows (name, description, graph_json, enabled, created_at, updated_at)
-    VALUES (?, ?, ?, 1, ?, ?)
-  `).run(name, description || '', JSON.stringify(graph), now, now);
-  const id = Number(info.lastInsertRowid);
-  // Mongo mirror: store the decoded graph object so it's queryable.
-  mongoUpsertById('workflows', id, {
-    id, name, description: description || '', graph, enabled: true,
+  await db.collection('workflows').insertOne({
+    _id: id, id, name, description: description || '', graph, enabled: true,
     created_at: now, updated_at: now
   });
   return id;
 }
 
-export function updateWorkflow(id, { name, description, graph, enabled }) {
-  const db = getDb();
-  const current = db.prepare('SELECT * FROM workflows WHERE id = ?').get(id);
+export async function updateWorkflow(id, { name, description, graph, enabled }) {
+  const db = await getMongoDb();
+  const current = await db.collection('workflows').findOne({ _id: Number(id) });
   if (!current) return false;
-  const updatedAt = Date.now();
-  const next = {
-    name: name ?? current.name,
-    description: description ?? current.description ?? '',
-    graph_json: graph ? JSON.stringify(graph) : current.graph_json,
-    enabled: enabled == null ? current.enabled : (enabled ? 1 : 0)
-  };
-  db.prepare(`
-    UPDATE workflows
-    SET name = ?, description = ?, graph_json = ?, enabled = ?, updated_at = ?
-    WHERE id = ?
-  `).run(next.name, next.description, next.graph_json, next.enabled, updatedAt, id);
-  mongoUpdateById('workflows', id, {
-    name: next.name,
-    description: next.description,
-    graph: safeJson(next.graph_json) || {},
-    enabled: next.enabled === 1,
-    updated_at: updatedAt
-  });
+  const $set = { updated_at: Date.now() };
+  if (name != null) $set.name = name;
+  if (description != null) $set.description = description;
+  if (graph != null) $set.graph = graph;
+  if (enabled != null) $set.enabled = Boolean(enabled);
+  await db.collection('workflows').updateOne({ _id: Number(id) }, { $set });
   return true;
 }
 
-export function deleteWorkflow(id) {
-  const changes = getDb().prepare('DELETE FROM workflows WHERE id = ?').run(id).changes;
-  mongoDeleteById('workflows', id);
-  // Mongo has no cascading FKs -- drop child runs + actions ourselves.
-  mongoDeleteMany('workflow_runs', { workflow_id: id });
-  mongoDeleteMany('workflow_actions', { workflow_id: id });
-  return changes;
+export async function deleteWorkflow(id) {
+  const db = await getMongoDb();
+  const res = await db.collection('workflows').deleteOne({ _id: Number(id) });
+  // Cascade child runs + actions (no FKs in Mongo).
+  await db.collection('workflow_runs').deleteMany({ workflow_id: Number(id) });
+  await db.collection('workflow_actions').deleteMany({ workflow_id: Number(id) });
+  return res.deletedCount;
 }
 
 // --- runs ----------------------------------------------------------------
 
-export function createRun({ workflowId, mode }) {
-  const startedAt = Date.now();
-  const info = getDb().prepare(`
-    INSERT INTO workflow_runs (workflow_id, mode, status, summary, started_at)
-    VALUES (?, ?, 'running', NULL, ?)
-  `).run(workflowId, mode, startedAt);
-  const id = Number(info.lastInsertRowid);
-  mongoUpsertById('workflow_runs', id, {
-    id, workflow_id: workflowId, mode, status: 'running',
-    summary: null, started_at: startedAt, finished_at: null
+export async function createRun({ workflowId, mode }) {
+  const db = await getMongoDb();
+  const id = await nextId('workflow_runs');
+  const started_at = Date.now();
+  await db.collection('workflow_runs').insertOne({
+    _id: id, id, workflow_id: workflowId == null ? null : Number(workflowId),
+    mode, status: 'running', summary: null, started_at, finished_at: null
   });
   return id;
 }
 
-export function finalizeRun(runId, { status, summary }) {
-  const finishedAt = Date.now();
-  getDb().prepare(`
-    UPDATE workflow_runs
-    SET status = ?, summary = ?, finished_at = ?
-    WHERE id = ?
-  `).run(status, JSON.stringify(summary || {}), finishedAt, runId);
-  mongoUpdateById('workflow_runs', runId, {
-    status, summary: summary || {}, finished_at: finishedAt
-  });
-}
-
-export function recordAction({ runId, resumeId, candidate, nodeId, nodeType, status, detail }) {
-  const createdAt = Date.now();
-  const info = getDb().prepare(`
-    INSERT INTO workflow_actions (run_id, resume_id, candidate, node_id, node_type, status, detail_json, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(
-    runId,
-    resumeId ?? null,
-    candidate || null,
-    nodeId,
-    nodeType,
-    status,
-    JSON.stringify(detail || {}),
-    createdAt
+export async function finalizeRun(runId, { status, summary }) {
+  const db = await getMongoDb();
+  await db.collection('workflow_runs').updateOne(
+    { _id: Number(runId) },
+    { $set: { status, summary: summary || {}, finished_at: Date.now() } }
   );
-  const id = Number(info.lastInsertRowid);
-  mongoUpsertById('workflow_actions', id, {
-    id, run_id: runId, resume_id: resumeId ?? null,
+}
+
+export async function recordAction({ runId, resumeId, candidate, nodeId, nodeType, status, detail }) {
+  const db = await getMongoDb();
+  const id = await nextId('workflow_actions');
+  await db.collection('workflow_actions').insertOne({
+    _id: id, id, run_id: Number(runId), resume_id: resumeId ?? null,
     candidate: candidate || null, node_id: nodeId, node_type: nodeType,
-    status, detail: detail || {}, created_at: createdAt
+    status, detail: detail || {}, created_at: Date.now()
   });
 }
 
-export function listRuns({ workflowId, limit = 30 } = {}) {
-  const db = getDb();
-  if (workflowId) {
-    return db.prepare(`
-      SELECT r.*, w.name AS workflow_name
-      FROM workflow_runs r LEFT JOIN workflows w ON w.id = r.workflow_id
-      WHERE r.workflow_id = ?
-      ORDER BY r.started_at DESC LIMIT ?
-    `).all(workflowId, limit).map(decodeRun);
-  }
-  return db.prepare(`
-    SELECT r.*, w.name AS workflow_name
-    FROM workflow_runs r LEFT JOIN workflows w ON w.id = r.workflow_id
-    ORDER BY r.started_at DESC LIMIT ?
-  `).all(limit).map(decodeRun);
+export async function listRuns({ workflowId, limit = 30 } = {}) {
+  const db = await getMongoDb();
+  const match = workflowId ? { workflow_id: Number(workflowId) } : {};
+  return db.collection('workflow_runs').aggregate([
+    { $match: match },
+    { $sort: { started_at: -1 } },
+    { $limit: limit },
+    { $lookup: { from: 'workflows', localField: 'workflow_id', foreignField: '_id', as: '_w' } },
+    { $addFields: { workflow_name: { $arrayElemAt: ['$_w.name', 0] } } },
+    { $project: { _id: 0, _w: 0 } }
+  ]).toArray();
 }
 
-export function getRun(id) {
-  const db = getDb();
-  const run = db.prepare(`
-    SELECT r.*, w.name AS workflow_name
-    FROM workflow_runs r LEFT JOIN workflows w ON w.id = r.workflow_id
-    WHERE r.id = ?
-  `).get(id);
+export async function getRun(id) {
+  const db = await getMongoDb();
+  const runs = await db.collection('workflow_runs').aggregate([
+    { $match: { _id: Number(id) } },
+    { $lookup: { from: 'workflows', localField: 'workflow_id', foreignField: '_id', as: '_w' } },
+    { $addFields: { workflow_name: { $arrayElemAt: ['$_w.name', 0] } } },
+    { $project: { _id: 0, _w: 0 } }
+  ]).toArray();
+  const run = runs[0];
   if (!run) return null;
-  const actions = db.prepare(`
-    SELECT * FROM workflow_actions WHERE run_id = ? ORDER BY id ASC
-  `).all(id).map((a) => ({
-    ...a,
-    detail: safeJson(a.detail_json)
-  }));
-  return { ...decodeRun(run), actions };
+  const actions = await db.collection('workflow_actions')
+    .find({ run_id: Number(id) }, { projection: { _id: 0 } })
+    .sort({ id: 1 })
+    .toArray();
+  return { ...run, actions };
 }
-
-function decodeRun(r) {
-  return { ...r, summary: safeJson(r.summary) };
-}
-function safeJson(s) { try { return JSON.parse(s); } catch { return null; } }
 
 // --- interviewers --------------------------------------------------------
 
-export function listInterviewers() {
-  return getDb().prepare('SELECT * FROM interviewers ORDER BY name ASC').all().map(decodeInterviewer);
+export async function listInterviewers() {
+  const db = await getMongoDb();
+  return db.collection('interviewers').find({}, { projection: { _id: 0 } }).sort({ name: 1 }).toArray();
 }
-export function getInterviewer(id) {
-  const row = getDb().prepare('SELECT * FROM interviewers WHERE id = ?').get(id);
-  return row ? decodeInterviewer(row) : null;
+
+export async function getInterviewer(id) {
+  const db = await getMongoDb();
+  const row = await db.collection('interviewers').findOne({ _id: Number(id) }, { projection: { _id: 0 } });
+  if (!row) return null;
+  return { ...row, availability: Array.isArray(row.availability) ? row.availability : [] };
 }
-function decodeInterviewer(r) {
-  let windows = [];
-  try { windows = JSON.parse(r.availability_json || '[]') || []; } catch { windows = []; }
-  return { ...r, availability: windows };
-}
-export function createInterviewer({ name, email, calendarId, timezone }) {
-  const createdAt = Date.now();
-  const info = getDb().prepare(`
-    INSERT INTO interviewers (name, email, calendar_id, timezone, availability_json, created_at)
-    VALUES (?, ?, ?, ?, '[]', ?)
-  `).run(name, email, calendarId || 'primary', timezone || null, createdAt);
-  const id = Number(info.lastInsertRowid);
-  mongoUpsertById('interviewers', id, {
-    id, name, email,
+
+export async function createInterviewer({ name, email, calendarId, timezone }) {
+  const db = await getMongoDb();
+  const id = await nextId('interviewers');
+  await db.collection('interviewers').insertOne({
+    _id: id, id, name, email,
     calendar_id: calendarId || 'primary',
     timezone: timezone || null,
     availability: [],
-    created_at: createdAt
+    created_at: Date.now()
   });
   return id;
 }
-export function deleteInterviewer(id) {
-  const changes = getDb().prepare('DELETE FROM interviewers WHERE id = ?').run(id).changes;
-  mongoDeleteById('interviewers', id);
-  return changes;
+
+export async function deleteInterviewer(id) {
+  const db = await getMongoDb();
+  const res = await db.collection('interviewers').deleteOne({ _id: Number(id) });
+  return res.deletedCount;
 }
 
 // Availability window helpers. Each window: { id, start, end } (ISO strings).
-// We rewrite the whole JSON blob on every change — list is small per person.
-export function addAvailabilityWindow(interviewerId, { start, end }) {
+export async function addAvailabilityWindow(interviewerId, { start, end }) {
   if (!start || !end) throw new Error('start and end are required.');
   const startTs = Date.parse(start), endTs = Date.parse(end);
   if (!Number.isFinite(startTs) || !Number.isFinite(endTs)) throw new Error('Invalid date.');
   if (endTs <= startTs) throw new Error('End must be after start.');
-  const iv = getInterviewer(interviewerId);
+  const iv = await getInterviewer(interviewerId);
   if (!iv) throw new Error('Interviewer not found.');
   const winId = `w-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
   const next = [...(iv.availability || []), { id: winId, start, end }]
     .sort((a, b) => Date.parse(a.start) - Date.parse(b.start));
-  getDb().prepare('UPDATE interviewers SET availability_json = ? WHERE id = ?')
-    .run(JSON.stringify(next), interviewerId);
-  mongoUpdateById('interviewers', interviewerId, { availability: next });
+  const db = await getMongoDb();
+  await db.collection('interviewers').updateOne({ _id: Number(interviewerId) }, { $set: { availability: next } });
   return { id: winId, windows: next };
 }
-export function removeAvailabilityWindow(interviewerId, windowId) {
-  const iv = getInterviewer(interviewerId);
+
+export async function removeAvailabilityWindow(interviewerId, windowId) {
+  const iv = await getInterviewer(interviewerId);
   if (!iv) return 0;
   const next = (iv.availability || []).filter((w) => w.id !== windowId);
-  getDb().prepare('UPDATE interviewers SET availability_json = ? WHERE id = ?')
-    .run(JSON.stringify(next), interviewerId);
-  mongoUpdateById('interviewers', interviewerId, { availability: next });
+  const db = await getMongoDb();
+  await db.collection('interviewers').updateOne({ _id: Number(interviewerId) }, { $set: { availability: next } });
   return 1;
 }
 
 // --- OA templates --------------------------------------------------------
 
-export function listTemplates() {
-  return getDb().prepare('SELECT * FROM oa_templates ORDER BY updated_at DESC').all();
+export async function listTemplates() {
+  const db = await getMongoDb();
+  return db.collection('oa_templates').find({}, { projection: { _id: 0 } }).sort({ updated_at: -1 }).toArray();
 }
-export function getTemplate(id) {
-  return getDb().prepare('SELECT * FROM oa_templates WHERE id = ?').get(id);
+
+export async function getTemplate(id) {
+  const db = await getMongoDb();
+  return db.collection('oa_templates').findOne({ _id: Number(id) }, { projection: { _id: 0 } });
 }
-export function createTemplate({ name, subject, body, oaLink }) {
+
+export async function createTemplate({ name, subject, body, oaLink }) {
+  const db = await getMongoDb();
+  const id = await nextId('oa_templates');
   const now = Date.now();
-  const info = getDb().prepare(`
-    INSERT INTO oa_templates (name, subject, body, oa_link, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?)
-  `).run(name, subject, body, oaLink || null, now, now);
-  const id = Number(info.lastInsertRowid);
-  mongoUpsertById('oa_templates', id, {
-    id, name, subject, body, oa_link: oaLink || null,
-    created_at: now, updated_at: now
+  await db.collection('oa_templates').insertOne({
+    _id: id, id, name, subject, body, oa_link: oaLink || null, created_at: now, updated_at: now
   });
   return id;
 }
-export function updateTemplate(id, { name, subject, body, oaLink }) {
-  const cur = getTemplate(id);
+
+export async function updateTemplate(id, { name, subject, body, oaLink }) {
+  const db = await getMongoDb();
+  const cur = await db.collection('oa_templates').findOne({ _id: Number(id) });
   if (!cur) return false;
-  const updatedAt = Date.now();
-  const next = {
-    name: name ?? cur.name,
-    subject: subject ?? cur.subject,
-    body: body ?? cur.body,
-    oa_link: oaLink ?? cur.oa_link
-  };
-  getDb().prepare(`
-    UPDATE oa_templates SET name = ?, subject = ?, body = ?, oa_link = ?, updated_at = ?
-    WHERE id = ?
-  `).run(next.name, next.subject, next.body, next.oa_link, updatedAt, id);
-  mongoUpdateById('oa_templates', id, { ...next, updated_at: updatedAt });
+  const $set = { updated_at: Date.now() };
+  if (name != null) $set.name = name;
+  if (subject != null) $set.subject = subject;
+  if (body != null) $set.body = body;
+  if (oaLink != null) $set.oa_link = oaLink;
+  await db.collection('oa_templates').updateOne({ _id: Number(id) }, { $set });
   return true;
 }
-export function deleteTemplate(id) {
-  const changes = getDb().prepare('DELETE FROM oa_templates WHERE id = ?').run(id).changes;
-  mongoDeleteById('oa_templates', id);
-  return changes;
+
+export async function deleteTemplate(id) {
+  const db = await getMongoDb();
+  const res = await db.collection('oa_templates').deleteOne({ _id: Number(id) });
+  return res.deletedCount;
 }
 
 // --- seeding -------------------------------------------------------------
 
-// Drop in a couple of useful presets the very first time the tables are
-// created. Idempotent: skips if rows already exist.
-export function seedDefaults() {
-  const db = getDb();
-  const wfCount = db.prepare('SELECT COUNT(*) AS n FROM workflows').get().n;
+// Drop in a couple of useful presets the very first time. Idempotent: skips if
+// rows already exist.
+export async function seedDefaults() {
+  const db = await getMongoDb();
+  const wfCount = await db.collection('workflows').countDocuments();
   if (wfCount === 0) {
     const oaPlaybook = {
       nodes: [
@@ -407,7 +283,7 @@ export function seedDefaults() {
         { from: 'sched',   to: 'log' }
       ]
     };
-    createWorkflow({
+    await createWorkflow({
       name: 'Top picks → OA + Interview',
       description: 'Send the OA link and book a Google Meet interview for candidates scoring 75+',
       graph: oaPlaybook
@@ -424,16 +300,16 @@ export function seedDefaults() {
         { from: 'filter',  to: 'reject' }
       ]
     };
-    createWorkflow({
+    await createWorkflow({
       name: 'Polite rejection blast',
       description: 'Send a warm, brand-safe rejection to candidates under 45',
       graph: rejectPlaybook
     });
   }
 
-  const tplCount = db.prepare('SELECT COUNT(*) AS n FROM oa_templates').get().n;
+  const tplCount = await db.collection('oa_templates').countDocuments();
   if (tplCount === 0) {
-    createTemplate({
+    await createTemplate({
       name: 'Default OA invite',
       subject: 'Online assessment for the {{role}} role — please complete by {{deadline}}',
       body:

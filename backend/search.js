@@ -11,192 +11,142 @@
 // "fresh grads") DO NOT burn Groq tokens. The /chat route still falls back
 // to RAG + AI for fuzzier asks.
 
-import { getDb } from './db.js';
+import { getMongoDb } from './mongo.js';
 import { CATEGORIES, CATEGORY_LABELS } from './ai.js';
 
 // ---------------------------------------------------------------------------
 // SQL filter builder.
 
-export function searchResumes(filters = {}) {
-  const db = getDb();
-  const where = [];
-  const params = [];
+export async function searchResumes(filters = {}) {
+  const db = await getMongoDb();
+  const and = [];
+
+  // Case-insensitive substring match. MUST escape regex metachars so skills
+  // like "c++", "c#", "node.js" are treated literally (a behavior the old
+  // SQL LIKE got for free). A regex against an array field (e.g. top_skills)
+  // matches if ANY element matches — reproduces the old JSON-string LIKE.
+  const escapeRegex = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const rx = (s) => new RegExp(escapeRegex(String(s).trim()), 'i');
 
   if (filters.category) {
-    where.push('category = ?');
-    params.push(String(filters.category).toLowerCase());
+    and.push({ category: String(filters.category).toLowerCase() });
   }
 
   if (Number.isFinite(filters.minScore)) {
-    where.push('COALESCE(score, 0) >= ?');
-    params.push(filters.minScore);
+    and.push({ score: { $gte: filters.minScore } });
   }
   if (Number.isFinite(filters.maxScore)) {
-    where.push('COALESCE(score, 0) <= ?');
-    params.push(filters.maxScore);
+    // COALESCE(score,0) <= max also matches null/unscored (treated as 0).
+    and.push({ $or: [{ score: { $lte: filters.maxScore } }, { score: null }, { score: { $exists: false } }] });
   }
 
   if (Number.isFinite(filters.minYears)) {
-    where.push('COALESCE(years_experience, 0) >= ?');
-    params.push(filters.minYears);
+    and.push({ years_experience: { $gte: filters.minYears } });
   }
   if (Number.isFinite(filters.maxYears)) {
-    where.push('COALESCE(years_experience, 0) <= ?');
-    params.push(filters.maxYears);
+    and.push({ $or: [{ years_experience: { $lte: filters.maxYears } }, { years_experience: null }, { years_experience: { $exists: false } }] });
   }
 
-  // Free-text search across raw_text + name + skills + role title. Uses LIKE
-  // (case-insensitive thanks to COLLATE NOCASE) — at MVP scale (<10k rows)
-  // a full scan is fine and beats setting up FTS5.
+  // Free-text across name/role/title/company/location/raw_text/top_skills.
+  // Also matches a #CAN id like "#CAN00042" / "can42" / "42".
   if (filters.q && filters.q.trim()) {
-    const q = `%${filters.q.trim()}%`;
-    where.push(`(
-      COALESCE(candidate_name, '')    LIKE ? COLLATE NOCASE OR
-      COALESCE(role_title, '')        LIKE ? COLLATE NOCASE OR
-      COALESCE(top_skills, '')        LIKE ? COLLATE NOCASE OR
-      COALESCE(current_title, '')     LIKE ? COLLATE NOCASE OR
-      COALESCE(current_company, '')   LIKE ? COLLATE NOCASE OR
-      COALESCE(location, '')          LIKE ? COLLATE NOCASE OR
-      COALESCE(raw_text, '')          LIKE ? COLLATE NOCASE
-    )`);
-    for (let i = 0; i < 7; i++) params.push(q);
+    const r = rx(filters.q.trim());
+    const or = [
+      { candidate_name: r }, { role_title: r }, { current_title: r },
+      { current_company: r }, { location: r }, { raw_text: r }, { top_skills: r }
+    ];
+    const idMatch = String(filters.q).trim().match(/#?can?0*(\d+)/i);
+    if (idMatch) or.push({ id: Number(idMatch[1]) });
+    and.push({ $or: or });
   }
 
-  // Each requested skill must appear in the top_skills JSON. We store skills
-  // as a JSON-encoded array string, so a LIKE match works for our purposes.
+  // Each requested skill must appear (AND across skills; OR within fields).
   if (Array.isArray(filters.skills) && filters.skills.length) {
     for (const skill of filters.skills) {
       const s = String(skill).trim();
       if (!s) continue;
-      where.push(`(
-        COALESCE(top_skills, '') LIKE ? COLLATE NOCASE OR
-        COALESCE(raw_text, '')   LIKE ? COLLATE NOCASE
-      )`);
-      params.push(`%${s}%`, `%${s}%`);
+      const r = rx(s);
+      and.push({ $or: [{ top_skills: r }, { raw_text: r }] });
     }
   }
 
-  // Location can match home location OR any work location OR raw text -- so
-  // "Boston" finds someone whose current address says Mumbai but worked in
-  // Boston. This is the single biggest fix for the Boston/remote miss.
+  // Location matches home OR any work location OR raw text.
   if (filters.location && filters.location.trim()) {
-    const loc = `%${filters.location.trim()}%`;
-    where.push(`(
-      COALESCE(location, '')          LIKE ? COLLATE NOCASE OR
-      COALESCE(work_locations, '')    LIKE ? COLLATE NOCASE OR
-      COALESCE(raw_text, '')          LIKE ? COLLATE NOCASE
-    )`);
-    params.push(loc, loc, loc);
+    const r = rx(filters.location.trim());
+    and.push({ $or: [{ location: r }, { work_locations: r }, { raw_text: r }] });
   }
 
-  // L2 new filters --------------------------------------------------------
   if (filters.remote === true) {
-    where.push(`(
-      remote_worked = 1 OR
-      COALESCE(work_locations, '') LIKE '%remote%' COLLATE NOCASE OR
-      COALESCE(raw_text, '')       LIKE '%remote%' COLLATE NOCASE
-    )`);
+    and.push({ $or: [{ remote_worked: true }, { work_locations: /remote/i }, { raw_text: /remote/i }] });
   }
   if (Number.isFinite(filters.minRemoteYears)) {
-    where.push('COALESCE(remote_years, 0) >= ?');
-    params.push(filters.minRemoteYears);
+    and.push({ remote_years: { $gte: filters.minRemoteYears } });
   }
   if (filters.managedPeople === true) {
-    where.push('managed_people = 1');
+    and.push({ managed_people: true });
   }
   if (Number.isFinite(filters.minTeamSize)) {
-    where.push('COALESCE(team_size_managed, 0) >= ?');
-    params.push(filters.minTeamSize);
+    and.push({ team_size_managed: { $gte: filters.minTeamSize } });
   }
   if (filters.openToRelocate === true) {
-    where.push('open_to_relocate = 1');
+    and.push({ open_to_relocate: true });
   }
   if (filters.publications === true) {
-    where.push('publications = 1');
+    and.push({ publications: true });
   }
   if (filters.company && filters.company.trim()) {
-    const co = `%${filters.company.trim()}%`;
-    where.push(`(
-      COALESCE(companies, '')       LIKE ? COLLATE NOCASE OR
-      COALESCE(current_company, '') LIKE ? COLLATE NOCASE OR
-      COALESCE(raw_text, '')        LIKE ? COLLATE NOCASE
-    )`);
-    params.push(co, co, co);
+    const r = rx(filters.company.trim());
+    and.push({ $or: [{ companies: r }, { current_company: r }, { raw_text: r }] });
   }
   if (Array.isArray(filters.domains) && filters.domains.length) {
     for (const d of filters.domains) {
       const dom = String(d).trim();
       if (!dom) continue;
-      where.push(`(
-        COALESCE(domains, '')  LIKE ? COLLATE NOCASE OR
-        COALESCE(raw_text, '') LIKE ? COLLATE NOCASE
-      )`);
-      params.push(`%${dom}%`, `%${dom}%`);
+      const r = rx(dom);
+      and.push({ $or: [{ domains: r }, { raw_text: r }] });
     }
   }
   if (filters.school && filters.school.trim()) {
-    const sc = `%${filters.school.trim()}%`;
-    where.push(`(
-      COALESCE(education_json, '')    LIKE ? COLLATE NOCASE OR
-      COALESCE(highest_education, '') LIKE ? COLLATE NOCASE OR
-      COALESCE(raw_text, '')          LIKE ? COLLATE NOCASE
-    )`);
-    params.push(sc, sc, sc);
+    const r = rx(filters.school.trim());
+    and.push({ $or: [
+      { education: { $elemMatch: { $or: [{ school: r }, { degree: r }] } } },
+      { highest_education: r },
+      { raw_text: r }
+    ] });
   }
   if (filters.workLocation && filters.workLocation.trim()) {
-    const wl = `%${filters.workLocation.trim()}%`;
-    where.push(`(
-      COALESCE(work_locations, '') LIKE ? COLLATE NOCASE OR
-      COALESCE(raw_text, '')       LIKE ? COLLATE NOCASE
-    )`);
-    params.push(wl, wl);
+    const r = rx(filters.workLocation.trim());
+    and.push({ $or: [{ work_locations: r }, { raw_text: r }] });
   }
 
-  const sql = `
-    SELECT id, filename, candidate_name, score, category, role_title, created_at,
-           email, phone, location, linkedin, github, portfolio,
-           current_title, current_company, years_experience, highest_education,
-           top_skills, languages, notice_period, expected_salary,
-           file_path, content_type,
-           work_locations, companies, domains,
-           remote_worked, remote_years, remote_evidence,
-           managed_people, team_size_managed, open_to_relocate,
-           education_json, certifications, publications,
-           review_json
-    FROM resumes
-    ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
-    ORDER BY COALESCE(score, 0) DESC, created_at DESC
-    LIMIT ?
-  `;
+  const match = and.length ? { $and: and } : {};
   const limit = Number.isFinite(filters.limit) ? filters.limit : 200;
-  params.push(limit);
 
-  const rows = db.prepare(sql).all(...params);
-  return rows.map((r) => {
-    let review = null;
-    try { review = JSON.parse(r.review_json); } catch { review = null; }
-    return {
-      ...r,
-      top_skills:     safeJson(r.top_skills)     || [],
-      languages:      safeJson(r.languages)      || [],
-      work_locations: safeJson(r.work_locations) || [],
-      companies:      safeJson(r.companies)      || [],
-      domains:        safeJson(r.domains)        || [],
-      education:      safeJson(r.education_json) || [],
-      certifications: safeJson(r.certifications) || [],
-      remote_worked:    r.remote_worked === 1,
-      managed_people:   r.managed_people === 1,
-      open_to_relocate: r.open_to_relocate === 1,
-      publications:     r.publications === 1,
-      summary: review?.summary || '',
-      review_json: undefined
-    };
-  });
-}
+  // ORDER BY COALESCE(score,0) DESC, created_at DESC. $addFields normalizes a
+  // null score to 0 so unscored rows sort low (matching the old COALESCE).
+  const rows = await db.collection('resumes').aggregate([
+    { $match: match },
+    { $addFields: { _ss: { $ifNull: ['$score', 0] }, summary: { $ifNull: ['$review.summary', ''] } } },
+    { $sort: { _ss: -1, created_at: -1 } },
+    { $limit: limit },
+    { $project: { _id: 0, _ss: 0, raw_text: 0, review: 0 } }
+  ]).toArray();
 
-function safeJson(s) {
-  if (!s) return null;
-  try { return JSON.parse(s); } catch { return null; }
+  // Docs are already decoded (arrays/booleans); just defend against missing.
+  return rows.map((r) => ({
+    ...r,
+    top_skills:     Array.isArray(r.top_skills) ? r.top_skills : [],
+    languages:      Array.isArray(r.languages) ? r.languages : [],
+    work_locations: Array.isArray(r.work_locations) ? r.work_locations : [],
+    companies:      Array.isArray(r.companies) ? r.companies : [],
+    domains:        Array.isArray(r.domains) ? r.domains : [],
+    education:      Array.isArray(r.education) ? r.education : [],
+    certifications: Array.isArray(r.certifications) ? r.certifications : [],
+    remote_worked:    r.remote_worked === true,
+    managed_people:   r.managed_people === true,
+    open_to_relocate: r.open_to_relocate === true,
+    publications:     r.publications === true
+  }));
 }
 
 // ---------------------------------------------------------------------------
@@ -568,79 +518,79 @@ function sanitizeFilters(json) {
 // ---------------------------------------------------------------------------
 // Stats for the dashboard.
 
-export function getStats() {
-  const db = getDb();
+export async function getStats() {
+  const db = await getMongoDb();
+  // Single scan; the docs are small with this projection and we compute the
+  // rest in JS (same shape as before, fewer round-trips than the old per-day
+  // timeline queries).
+  const docs = await db.collection('resumes').find({}, {
+    projection: {
+      _id: 0, id: 1, score: 1, category: 1, created_at: 1, candidate_name: 1, filename: 1,
+      role_title: 1, top_skills: 1, companies: 1, years_experience: 1,
+      highest_education: 1, education: 1, review: 1
+    }
+  }).toArray();
 
-  const total = db.prepare('SELECT COUNT(*) AS n FROM resumes').get().n;
-  const avgScoreRow = db.prepare('SELECT AVG(score) AS avg FROM resumes WHERE score IS NOT NULL').get();
-  const avgScore = avgScoreRow.avg != null ? Math.round(avgScoreRow.avg) : 0;
+  const total = docs.length;
+  const scored = docs.filter((d) => d.score != null);
+  const avgScore = scored.length ? Math.round(scored.reduce((s, d) => s + d.score, 0) / scored.length) : 0;
 
   // Counts by category, ordered by count desc, with human labels.
-  const byCategoryRows = db.prepare(`
-    SELECT COALESCE(category, 'unknown') AS category, COUNT(*) AS count, ROUND(AVG(score)) AS avg_score
-    FROM resumes
-    GROUP BY COALESCE(category, 'unknown')
-    ORDER BY count DESC
-  `).all();
-  const byCategory = byCategoryRows.map((r) => ({
-    category: r.category,
-    label: CATEGORY_LABELS[r.category] || (r.category === 'unknown' ? 'Uncategorized' : r.category),
-    count: r.count,
-    avgScore: r.avg_score || 0
-  }));
+  const catMap = new Map();
+  for (const d of docs) {
+    const key = d.category || 'unknown';
+    if (!catMap.has(key)) catMap.set(key, { count: 0, sum: 0, scored: 0 });
+    const c = catMap.get(key);
+    c.count++;
+    if (d.score != null) { c.sum += d.score; c.scored++; }
+  }
+  const byCategory = Array.from(catMap.entries())
+    .map(([category, c]) => ({
+      category,
+      label: CATEGORY_LABELS[category] || (category === 'unknown' ? 'Uncategorized' : category),
+      count: c.count,
+      avgScore: c.scored ? Math.round(c.sum / c.scored) : 0
+    }))
+    .sort((a, b) => b.count - a.count);
 
-  // Score distribution in 10-point buckets (0-9, 10-19, ..., 90-100).
+  // Score distribution in 10-point buckets (0-9, ..., 90-100) + good/warn/bad.
   const buckets = Array.from({ length: 10 }, (_, i) => ({
     label: i === 9 ? '90-100' : `${i * 10}-${i * 10 + 9}`,
     count: 0
   }));
-  for (const r of db.prepare('SELECT score FROM resumes WHERE score IS NOT NULL').all()) {
-    const idx = Math.min(9, Math.max(0, Math.floor(r.score / 10)));
-    buckets[idx].count++;
-  }
-
-  // Score bands (good / warn / bad) for a doughnut chart.
   const bands = { good: 0, warn: 0, bad: 0 };
-  for (const r of db.prepare('SELECT score FROM resumes WHERE score IS NOT NULL').all()) {
-    if (r.score >= 75) bands.good++;
-    else if (r.score >= 50) bands.warn++;
+  for (const d of scored) {
+    const idx = Math.min(9, Math.max(0, Math.floor(d.score / 10)));
+    buckets[idx].count++;
+    if (d.score >= 75) bands.good++;
+    else if (d.score >= 50) bands.warn++;
     else bands.bad++;
   }
 
-  // Resumes added per day for the last 14 days. Uses local time bucketing
-  // (UTC midnight) which is fine for an MVP — recruiters won't care about
-  // timezone edges and this stays index-free.
+  // Resumes added per day for the last 14 days (UTC-midnight buckets).
   const now = Date.now();
   const day = 24 * 60 * 60 * 1000;
   const timeline = [];
   for (let i = 13; i >= 0; i--) {
     const start = new Date(now - i * day);
     start.setUTCHours(0, 0, 0, 0);
-    const end = start.getTime() + day;
-    const count = db.prepare(`
-      SELECT COUNT(*) AS n FROM resumes WHERE created_at >= ? AND created_at < ?
-    `).get(start.getTime(), end).n;
-    timeline.push({
-      date: start.toISOString().slice(0, 10),
-      count
-    });
+    const startMs = start.getTime();
+    const end = startMs + day;
+    const count = docs.filter((d) => d.created_at >= startMs && d.created_at < end).length;
+    timeline.push({ date: start.toISOString().slice(0, 10), count });
   }
 
   // Average breakdown across the 5 axes (experience/skills/education/clarity/impact).
   const breakdownAvg = { experience: 0, skills: 0, education: 0, clarity: 0, impact: 0 };
-  const breakdownRows = db.prepare('SELECT review_json FROM resumes').all();
-  if (breakdownRows.length) {
+  {
     const sums = { ...breakdownAvg };
     const counts = { experience: 0, skills: 0, education: 0, clarity: 0, impact: 0 };
-    for (const r of breakdownRows) {
-      try {
-        const review = JSON.parse(r.review_json);
-        const b = review.breakdown || {};
-        for (const k of Object.keys(sums)) {
-          const v = Number(b[k]);
-          if (Number.isFinite(v)) { sums[k] += v; counts[k]++; }
-        }
-      } catch { /* ignore */ }
+    for (const d of docs) {
+      const b = (d.review && d.review.breakdown) || {};
+      for (const k of Object.keys(sums)) {
+        const v = Number(b[k]);
+        if (Number.isFinite(v)) { sums[k] += v; counts[k]++; }
+      }
     }
     for (const k of Object.keys(sums)) {
       breakdownAvg[k] = counts[k] ? Math.round(sums[k] / counts[k]) : 0;
@@ -649,10 +599,8 @@ export function getStats() {
 
   // Top skills (frequency across all resumes).
   const skillCounts = new Map();
-  for (const r of db.prepare('SELECT top_skills FROM resumes WHERE top_skills IS NOT NULL').all()) {
-    let arr = [];
-    try { arr = JSON.parse(r.top_skills) || []; } catch { /* ignore */ }
-    for (const s of arr) {
+  for (const d of docs) {
+    for (const s of (Array.isArray(d.top_skills) ? d.top_skills : [])) {
       const key = String(s).trim().toLowerCase();
       if (!key) continue;
       skillCounts.set(key, (skillCounts.get(key) || 0) + 1);
@@ -663,15 +611,11 @@ export function getStats() {
     .slice(0, 12)
     .map(([skill, count]) => ({ skill, count }));
 
-  // Top companies — most-common past employers across the pipeline.
-  // Stored as a JSON array per resume; we lower-case for dedupe but keep
-  // a presentable casing for the label.
+  // Top companies — most-common past employers (lower-cased dedupe, keep label).
   const companyCounts = new Map();
   const companyLabel  = new Map();
-  for (const r of db.prepare('SELECT companies FROM resumes WHERE companies IS NOT NULL').all()) {
-    let arr = [];
-    try { arr = JSON.parse(r.companies) || []; } catch { /* ignore */ }
-    for (const c of arr) {
+  for (const d of docs) {
+    for (const c of (Array.isArray(d.companies) ? d.companies : [])) {
       const raw = String(c).trim();
       if (!raw) continue;
       const key = raw.toLowerCase();
@@ -684,7 +628,7 @@ export function getStats() {
     .slice(0, 8)
     .map(([key, count]) => ({ company: companyLabel.get(key), count }));
 
-  // Years-experience distribution (0, 1-2, 3-5, 6-10, 10+).
+  // Years-experience distribution.
   const yearBuckets = [
     { label: '0-1',  min: 0,   max: 1.99 },
     { label: '2-3',  min: 2,   max: 3.99 },
@@ -692,25 +636,24 @@ export function getStats() {
     { label: '7-10', min: 7,   max: 10.99 },
     { label: '10+',  min: 11,  max: 1000 }
   ].map((b) => ({ ...b, count: 0 }));
-  for (const r of db.prepare('SELECT years_experience FROM resumes WHERE years_experience IS NOT NULL').all()) {
-    const y = Number(r.years_experience);
+  for (const d of docs) {
+    const y = Number(d.years_experience);
     if (!Number.isFinite(y)) continue;
     for (const b of yearBuckets) {
       if (y >= b.min && y <= b.max) { b.count++; break; }
     }
   }
 
-  const recent = db.prepare(`
-    SELECT id, candidate_name, filename, score, category, role_title, created_at
-    FROM resumes
-    ORDER BY created_at DESC
-    LIMIT 8
-  `).all();
+  const recent = [...docs]
+    .sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))
+    .slice(0, 8)
+    .map((d) => ({
+      id: d.id, candidate_name: d.candidate_name, filename: d.filename,
+      score: d.score, category: d.category, role_title: d.role_title, created_at: d.created_at
+    }));
 
-  // Education breakdown — bucket each candidate's `highest_education` text
-  // (falling back to the first entry of `education_json`) into PhD,
-  // Master's, Bachelor's, Diploma or Other. Free-form text means we have
-  // to keyword-match instead of joining on a structured level field.
+  // Education breakdown — keyword-bucket highest_education (fallback: first
+  // education[].degree) into PhD / Master's / Bachelor's / Diploma / Other.
   const EDU_RULES = [
     { key: 'phd',       label: "PhD / Doctorate", tests: [/\bph\.?\s?d\b/i, /doctorate/i, /\bdoctor\b/i] },
     { key: 'masters',   label: "Master's",        tests: [/\bmaster/i, /\bm\.?tech\b/i, /\bm\.?sc\b/i, /\bm\.?s\.?\b/i, /\bm\.?a\.?\b/i, /\bmba\b/i, /post[- ]?graduat/i] },
@@ -718,13 +661,11 @@ export function getStats() {
     { key: 'diploma',   label: 'Diploma',         tests: [/\bdiploma\b/i, /\bassociate\b/i, /\bpolytechnic\b/i] }
   ];
   const eduCounts = { phd: 0, masters: 0, bachelors: 0, diploma: 0, other: 0 };
-  for (const row of db.prepare('SELECT highest_education, education_json FROM resumes').all()) {
-    let text = (row.highest_education || '').trim();
+  for (const d of docs) {
+    let text = (d.highest_education || '').trim();
     if (!text) {
-      try {
-        const arr = JSON.parse(row.education_json || '[]');
-        text = (arr[0]?.degree || '').trim();
-      } catch { /* ignore */ }
+      const arr = Array.isArray(d.education) ? d.education : [];
+      text = (arr[0]?.degree || '').trim();
     }
     if (!text) { eduCounts.other++; continue; }
     const hit = EDU_RULES.find((rule) => rule.tests.some((re) => re.test(text)));

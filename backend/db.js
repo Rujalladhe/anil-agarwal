@@ -1,448 +1,202 @@
-// SQLite + sqlite-vec setup. Single file at backend/data.db.
-// - `resumes`        : one row per scored resume (raw text + AI review JSON)
-// - `chunks`         : resume text split into retrieval-sized pieces
-// - `chunk_vectors`  : sqlite-vec virtual table, embedding per chunk (rowid = chunks.id)
-// - `chat_threads`   : conversations (resume_id NULL = "all resumes" thread)
-// - `chat_messages`  : messages inside a thread
+// MongoDB data layer (source of truth). Pinecone is the only vector store.
 //
-// Vector dimension is fixed at table-creation time. Default 768 matches
-// Google text-embedding-004. If you change EMBED_DIM later you must drop
-// the data.db file (or just the chunk_vectors table) and re-index.
+// Collections:
+// - resumes        : one doc per scored resume (raw text + decoded review object)
+// - chunks         : resume text split into retrieval-sized pieces (_id = chunk id,
+//                    which is also the Pinecone vector id). Embeddings live ONLY
+//                    in Pinecone; this collection holds the text for hydration +
+//                    the $text (BM25) index.
+// - chat_threads   : conversations (resume_id null = "all resumes" thread)
+// - chat_messages  : messages inside a thread
+//
+// Every exported function is async (the Mongo driver is async-only). Numeric ids
+// come from nextId() so they stay sequential integers.
 
-import Database from 'better-sqlite3';
-import * as sqliteVec from 'sqlite-vec';
-import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
-import {
-  mongoUpsertById, mongoUpdateById, mongoDeleteById, mongoDeleteMany
-} from './mongo.js';
+import { getMongoDb, nextId } from './mongo.js';
 import { deleteResumeVectors as pineconeDeleteResume } from './pinecone.js';
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const DB_PATH = process.env.DB_PATH || join(__dirname, 'data.db');
-const EMBED_DIM = Number(process.env.EMBED_DIM) || 768;
-
-let _db;
-
-export function getDb() {
-  if (_db) return _db;
-
-  const db = new Database(DB_PATH);
-  db.pragma('journal_mode = WAL');
-  db.pragma('foreign_keys = ON');
-
-  // Load the sqlite-vec extension. Throws if the platform binary is missing.
-  sqliteVec.load(db);
-
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS resumes (
-      id              INTEGER PRIMARY KEY AUTOINCREMENT,
-      email_id        TEXT,
-      attachment_id   TEXT,
-      filename        TEXT NOT NULL,
-      candidate_name  TEXT,
-      raw_text        TEXT NOT NULL,
-      score           INTEGER,
-      category        TEXT,
-      role_title      TEXT,
-      review_json     TEXT NOT NULL,
-      created_at      INTEGER NOT NULL
-    );
-
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_resumes_unique_attachment
-      ON resumes(email_id, attachment_id)
-      WHERE email_id IS NOT NULL AND attachment_id IS NOT NULL;
-
-    CREATE TABLE IF NOT EXISTS chunks (
-      id           INTEGER PRIMARY KEY AUTOINCREMENT,
-      resume_id    INTEGER NOT NULL REFERENCES resumes(id) ON DELETE CASCADE,
-      chunk_index  INTEGER NOT NULL,
-      text         TEXT NOT NULL
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_chunks_resume ON chunks(resume_id);
-
-    CREATE TABLE IF NOT EXISTS chat_threads (
-      id          INTEGER PRIMARY KEY AUTOINCREMENT,
-      resume_id   INTEGER REFERENCES resumes(id) ON DELETE CASCADE,
-      title       TEXT,
-      created_at  INTEGER NOT NULL
-    );
-
-    CREATE TABLE IF NOT EXISTS chat_messages (
-      id          INTEGER PRIMARY KEY AUTOINCREMENT,
-      thread_id   INTEGER NOT NULL REFERENCES chat_threads(id) ON DELETE CASCADE,
-      role        TEXT NOT NULL,
-      content     TEXT NOT NULL,
-      created_at  INTEGER NOT NULL
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_msgs_thread ON chat_messages(thread_id, id);
-  `);
-
-  // vec0 virtual table can only be created with a fixed dimension. Use
-  // CREATE VIRTUAL TABLE IF NOT EXISTS so re-runs are no-ops.
-  db.exec(`
-    CREATE VIRTUAL TABLE IF NOT EXISTS chunk_vectors USING vec0(
-      embedding FLOAT[${EMBED_DIM}]
-    );
-  `);
-
-  // --- Lightweight migrations for DBs created before category existed ----
-  migrateAddColumnIfMissing(db, 'resumes', 'category', 'TEXT');
-  migrateAddColumnIfMissing(db, 'resumes', 'role_title', 'TEXT');
-  // Candidate detail columns (extracted by the AI / regex fallbacks)
-  migrateAddColumnIfMissing(db, 'resumes', 'email', 'TEXT');
-  migrateAddColumnIfMissing(db, 'resumes', 'phone', 'TEXT');
-  migrateAddColumnIfMissing(db, 'resumes', 'location', 'TEXT');
-  migrateAddColumnIfMissing(db, 'resumes', 'linkedin', 'TEXT');
-  migrateAddColumnIfMissing(db, 'resumes', 'github', 'TEXT');
-  migrateAddColumnIfMissing(db, 'resumes', 'portfolio', 'TEXT');
-  migrateAddColumnIfMissing(db, 'resumes', 'current_title', 'TEXT');
-  migrateAddColumnIfMissing(db, 'resumes', 'current_company', 'TEXT');
-  migrateAddColumnIfMissing(db, 'resumes', 'years_experience', 'REAL');
-  migrateAddColumnIfMissing(db, 'resumes', 'highest_education', 'TEXT');
-  migrateAddColumnIfMissing(db, 'resumes', 'top_skills', 'TEXT');
-  migrateAddColumnIfMissing(db, 'resumes', 'languages', 'TEXT');
-  migrateAddColumnIfMissing(db, 'resumes', 'notice_period', 'TEXT');
-  migrateAddColumnIfMissing(db, 'resumes', 'expected_salary', 'TEXT');
-  // Path on disk to the original PDF/DOCX bytes (relative to backend/).
-  migrateAddColumnIfMissing(db, 'resumes', 'file_path', 'TEXT');
-  migrateAddColumnIfMissing(db, 'resumes', 'content_type', 'TEXT');
-
-  // --- L2: enriched recruiter-grade columns ----------------------------------
-  // All list/object fields stored as JSON strings.
-  migrateAddColumnIfMissing(db, 'resumes', 'work_locations',   'TEXT');   // JSON array
-  migrateAddColumnIfMissing(db, 'resumes', 'companies',        'TEXT');   // JSON array
-  migrateAddColumnIfMissing(db, 'resumes', 'domains',          'TEXT');   // JSON array (lowercased)
-  migrateAddColumnIfMissing(db, 'resumes', 'remote_worked',    'INTEGER');// 0/1
-  migrateAddColumnIfMissing(db, 'resumes', 'remote_years',     'REAL');
-  migrateAddColumnIfMissing(db, 'resumes', 'remote_evidence',  'TEXT');
-  migrateAddColumnIfMissing(db, 'resumes', 'managed_people',   'INTEGER');// 0/1
-  migrateAddColumnIfMissing(db, 'resumes', 'team_size_managed','INTEGER');
-  migrateAddColumnIfMissing(db, 'resumes', 'open_to_relocate', 'INTEGER');// 0/1
-  migrateAddColumnIfMissing(db, 'resumes', 'education_json',   'TEXT');   // JSON array
-  migrateAddColumnIfMissing(db, 'resumes', 'certifications',   'TEXT');   // JSON array
-  migrateAddColumnIfMissing(db, 'resumes', 'publications',     'INTEGER');// 0/1
-
-  // Indexes that depend on migrated columns -- create AFTER migrations.
-  db.exec(`
-    CREATE INDEX IF NOT EXISTS idx_resumes_category_score
-      ON resumes(category, score DESC);
-    CREATE INDEX IF NOT EXISTS idx_resumes_remote
-      ON resumes(remote_worked);
-  `);
-
-  // --- L4: FTS5 over chunk text for BM25/keyword retrieval ------------------
-  // External-content FTS5 table mirrors `chunks` via triggers. CRITICAL: use
-  // CREATE TRIGGER IF NOT EXISTS, never DROP+CREATE -- dropping triggers on
-  // every connect mutates the schema cookie. If two processes (server + a
-  // script) both reconnect, FTS5's internal index goes out of sync with the
-  // data and SQLite reports "database disk image is malformed". With IF NOT
-  // EXISTS the triggers are created exactly once and survive forever.
-  db.exec(`
-    CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
-      text,
-      content='chunks',
-      content_rowid='id',
-      tokenize='porter unicode61'
-    );
-
-    CREATE TRIGGER IF NOT EXISTS chunks_ai AFTER INSERT ON chunks BEGIN
-      INSERT INTO chunks_fts(rowid, text) VALUES (new.id, new.text);
-    END;
-
-    CREATE TRIGGER IF NOT EXISTS chunks_ad AFTER DELETE ON chunks BEGIN
-      INSERT INTO chunks_fts(chunks_fts, rowid, text) VALUES('delete', old.id, old.text);
-    END;
-
-    CREATE TRIGGER IF NOT EXISTS chunks_au AFTER UPDATE ON chunks BEGIN
-      INSERT INTO chunks_fts(chunks_fts, rowid, text) VALUES('delete', old.id, old.text);
-      INSERT INTO chunks_fts(rowid, text) VALUES (new.id, new.text);
-    END;
-  `);
-
-  // First-run backfill + drift-repair. If FTS row count diverges from the
-  // chunks table, rebuild the index. The rebuild operation is built into
-  // FTS5 for exactly this situation -- it re-reads `chunks` and re-emits
-  // every term, fixing any "malformed" state from earlier mishaps.
-  try {
-    const ftsCount = db.prepare('SELECT COUNT(*) AS n FROM chunks_fts').get().n;
-    const chunkCount = db.prepare('SELECT COUNT(*) AS n FROM chunks').get().n;
-    if (ftsCount === 0 && chunkCount > 0) {
-      db.exec(`INSERT INTO chunks_fts(rowid, text) SELECT id, text FROM chunks`);
-    } else if (ftsCount !== chunkCount) {
-      console.warn(`[db] FTS5 drift detected (${ftsCount} fts rows vs ${chunkCount} chunks). Rebuilding...`);
-      db.exec(`INSERT INTO chunks_fts(chunks_fts) VALUES('rebuild')`);
-    }
-  } catch (err) {
-    // Likely "database disk image is malformed" from a prior race. Hard
-    // reset the FTS5 index from chunks -- safe, doesn't touch resumes /
-    // chunks / vectors / chats.
-    console.warn(`[db] FTS5 check failed (${err.message}); hard-resetting chunks_fts.`);
-    db.exec(`DROP TABLE IF EXISTS chunks_fts`);
-    db.exec(`
-      CREATE VIRTUAL TABLE chunks_fts USING fts5(
-        text,
-        content='chunks',
-        content_rowid='id',
-        tokenize='porter unicode61'
-      );
-      INSERT INTO chunks_fts(rowid, text) SELECT id, text FROM chunks;
-    `);
-  }
-
-  _db = db;
-  return db;
-}
-
-function migrateAddColumnIfMissing(db, table, column, typeDecl) {
-  const cols = db.prepare(`PRAGMA table_info(${table})`).all();
-  if (!cols.some((c) => c.name === column)) {
-    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${typeDecl}`);
-  }
-}
-
-// Float32 array -> Buffer that sqlite-vec accepts as a vector blob.
-export function floatsToBlob(arr) {
-  return Buffer.from(new Float32Array(arr).buffer);
-}
 
 // ---------------------------------------------------------------------------
 // Resume CRUD
 
-export function insertResume({
-  emailId, attachmentId, filename, candidateName, rawText, score, category, roleTitle, reviewJson,
-  candidate, filePath, contentType
-}) {
-  const db = getDb();
-  const c = candidate || {};
-  const topSkillsJson    = Array.isArray(c.topSkills)     ? JSON.stringify(c.topSkills)     : null;
-  const languagesJson    = Array.isArray(c.languages)     ? JSON.stringify(c.languages)     : null;
-  const workLocsJson     = Array.isArray(c.workLocations) ? JSON.stringify(c.workLocations) : null;
-  const companiesJson    = Array.isArray(c.companies)     ? JSON.stringify(c.companies)     : null;
-  const domainsJson      = Array.isArray(c.domains)       ? JSON.stringify(c.domains)       : null;
-  const educationJson    = Array.isArray(c.education)     ? JSON.stringify(c.education)     : null;
-  const certsJson        = Array.isArray(c.certifications)? JSON.stringify(c.certifications): null;
-  const rem              = c.remoteExperience || {};
-  const remoteWorked     = (rem.worked === true) ? 1 : (rem.worked === false ? 0 : null);
-  const remoteYears      = Number.isFinite(Number(rem.years)) ? Number(rem.years) : null;
-  const remoteEvidence   = rem.evidence ? String(rem.evidence) : null;
-  const managedPeopleInt = (c.managedPeople  === true) ? 1 : (c.managedPeople  === false ? 0 : null);
-  const openToRelocInt   = (c.openToRelocate === true) ? 1 : (c.openToRelocate === false ? 0 : null);
-  const publicationsInt  = (c.publications   === true) ? 1 : (c.publications   === false ? 0 : null);
-  const teamSize         = Number.isFinite(Number(c.teamSizeManaged)) ? Number(c.teamSizeManaged) : null;
+// Field sets used to give INSERTs the same default shape the old SQLite->Mongo
+// mirror produced (missing arrays -> [], missing booleans -> false, else null).
+const RESUME_ARRAY_FIELDS = new Set([
+  'top_skills', 'languages', 'work_locations', 'companies', 'domains', 'education', 'certifications'
+]);
+const RESUME_BOOL_FIELDS = new Set([
+  'remote_worked', 'managed_people', 'open_to_relocate', 'publications'
+]);
 
-  // Upsert: if (email_id, attachment_id) collide, return the existing id.
-  const existing = (emailId && attachmentId)
-    ? db.prepare('SELECT id FROM resumes WHERE email_id = ? AND attachment_id = ?').get(emailId, attachmentId)
-    : null;
-  if (existing) {
-    db.prepare(`
-      UPDATE resumes
-      SET category          = COALESCE(?, category),
-          role_title        = COALESCE(?, role_title),
-          score             = COALESCE(?, score),
-          review_json       = ?,
-          candidate_name    = COALESCE(?, candidate_name),
-          email             = COALESCE(?, email),
-          phone             = COALESCE(?, phone),
-          location          = COALESCE(?, location),
-          linkedin          = COALESCE(?, linkedin),
-          github            = COALESCE(?, github),
-          portfolio         = COALESCE(?, portfolio),
-          current_title     = COALESCE(?, current_title),
-          current_company   = COALESCE(?, current_company),
-          years_experience  = COALESCE(?, years_experience),
-          highest_education = COALESCE(?, highest_education),
-          top_skills        = COALESCE(?, top_skills),
-          languages         = COALESCE(?, languages),
-          notice_period     = COALESCE(?, notice_period),
-          expected_salary   = COALESCE(?, expected_salary),
-          file_path         = COALESCE(?, file_path),
-          content_type      = COALESCE(?, content_type),
-          work_locations    = COALESCE(?, work_locations),
-          companies         = COALESCE(?, companies),
-          domains           = COALESCE(?, domains),
-          remote_worked     = COALESCE(?, remote_worked),
-          remote_years      = COALESCE(?, remote_years),
-          remote_evidence   = COALESCE(?, remote_evidence),
-          managed_people    = COALESCE(?, managed_people),
-          team_size_managed = COALESCE(?, team_size_managed),
-          open_to_relocate  = COALESCE(?, open_to_relocate),
-          education_json    = COALESCE(?, education_json),
-          certifications    = COALESCE(?, certifications),
-          publications      = COALESCE(?, publications)
-      WHERE id = ?
-    `).run(
-      category || null, roleTitle || null,
-      Number.isFinite(score) ? score : null,
-      JSON.stringify(reviewJson),
-      candidateName || c.name || null,
-      c.email || null, c.phone || null, c.location || null,
-      c.linkedin || null, c.github || null, c.portfolio || null,
-      c.currentTitle || null, c.currentCompany || null,
-      Number.isFinite(c.yearsExperience) ? c.yearsExperience : null,
-      c.highestEducation || null,
-      topSkillsJson, languagesJson,
-      c.noticePeriod || null, c.expectedSalary || null,
-      filePath || null, contentType || null,
-      workLocsJson, companiesJson, domainsJson,
-      remoteWorked, remoteYears, remoteEvidence,
-      managedPeopleInt, teamSize, openToRelocInt,
-      educationJson, certsJson, publicationsInt,
-      existing.id
+// Build the decoded candidate/review field map from insertResume args. A value
+// of `undefined` means "not provided" -> skipped on update (COALESCE semantics).
+function resumeFieldsFromArgs(args) {
+  const c = args.candidate || {};
+  const rem = c.remoteExperience || {};
+  const arr  = (x) => (Array.isArray(x) ? x : undefined);
+  const num  = (x) => (Number.isFinite(Number(x)) && x !== null && x !== '' ? Number(x) : undefined);
+  const str  = (x) => (x ? x : undefined);
+  const bool = (x) => (x === true ? true : x === false ? false : undefined);
+
+  return {
+    candidate_name:    str(args.candidateName || c.name),
+    category:          str(args.category),
+    role_title:        str(args.roleTitle),
+    score:             num(args.score),
+    email:             str(c.email),
+    phone:             str(c.phone),
+    location:          str(c.location),
+    linkedin:          str(c.linkedin),
+    github:            str(c.github),
+    portfolio:         str(c.portfolio),
+    current_title:     str(c.currentTitle),
+    current_company:   str(c.currentCompany),
+    years_experience:  num(c.yearsExperience),
+    highest_education: str(c.highestEducation),
+    top_skills:        arr(c.topSkills),
+    languages:         arr(c.languages),
+    notice_period:     str(c.noticePeriod),
+    expected_salary:   str(c.expectedSalary),
+    file_path:         str(args.filePath),
+    content_type:      str(args.contentType),
+    work_locations:    arr(c.workLocations),
+    companies:         arr(c.companies),
+    domains:           arr(c.domains),
+    remote_worked:     bool(rem.worked),
+    remote_years:      num(rem.years),
+    remote_evidence:   rem.evidence ? String(rem.evidence) : undefined,
+    managed_people:    bool(c.managedPeople),
+    team_size_managed: num(c.teamSizeManaged),
+    open_to_relocate:  bool(c.openToRelocate),
+    education:         arr(c.education),
+    certifications:    arr(c.certifications),
+    publications:      bool(c.publications)
+  };
+}
+
+function buildInsertDoc(id, args, fields, review) {
+  const doc = {
+    _id: id,
+    id,
+    email_id:      args.emailId || null,
+    attachment_id: args.attachmentId || null,
+    filename:      args.filename,
+    raw_text:      args.rawText,
+    created_at:    Date.now(),
+    review:        review ?? null
+  };
+  for (const [k, v] of Object.entries(fields)) {
+    if (v !== undefined) doc[k] = v;
+    else if (RESUME_ARRAY_FIELDS.has(k)) doc[k] = [];
+    else if (RESUME_BOOL_FIELDS.has(k)) doc[k] = false;
+    else doc[k] = null;
+  }
+  return doc;
+}
+
+function buildUpdateSet(fields, review) {
+  // review is ALWAYS overwritten (matches the old `review_json = ?`); every
+  // other field follows COALESCE — only overwrite when a value was provided.
+  const $set = { review: review ?? null };
+  for (const [k, v] of Object.entries(fields)) {
+    if (v !== undefined) $set[k] = v;
+  }
+  return $set;
+}
+
+export async function insertResume(args) {
+  const db = await getMongoDb();
+  const fields = resumeFieldsFromArgs(args);
+  const review = args.reviewJson;
+  const hasKey = Boolean(args.emailId && args.attachmentId);
+
+  // Upsert on (email_id, attachment_id): same message+attachment = same bytes,
+  // so we update the existing row rather than create a duplicate.
+  if (hasKey) {
+    const existing = await db.collection('resumes').findOne(
+      { email_id: args.emailId, attachment_id: args.attachmentId },
+      { projection: { _id: 1 } }
     );
-    // Mirror the up-to-date row into Mongo. Fire-and-forget; the mongo helper
-    // logs on failure and never throws so we don't block the user request.
-    mirrorResumeToMongo(existing.id);
-    return { id: existing.id, isNew: false };
+    if (existing) {
+      await db.collection('resumes').updateOne({ _id: existing._id }, { $set: buildUpdateSet(fields, review) });
+      return { id: existing._id, isNew: false };
+    }
   }
 
-  const info = db.prepare(`
-    INSERT INTO resumes
-      (email_id, attachment_id, filename, candidate_name, raw_text, score, category, role_title, review_json, created_at,
-       email, phone, location, linkedin, github, portfolio,
-       current_title, current_company, years_experience, highest_education,
-       top_skills, languages, notice_period, expected_salary,
-       file_path, content_type,
-       work_locations, companies, domains,
-       remote_worked, remote_years, remote_evidence,
-       managed_people, team_size_managed, open_to_relocate,
-       education_json, certifications, publications)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-            ?, ?, ?, ?, ?, ?,
-            ?, ?, ?, ?,
-            ?, ?, ?, ?,
-            ?, ?,
-            ?, ?, ?,
-            ?, ?, ?,
-            ?, ?, ?,
-            ?, ?, ?)
-  `).run(
-    emailId || null,
-    attachmentId || null,
-    filename,
-    candidateName || c.name || null,
-    rawText,
-    Number.isFinite(score) ? score : null,
-    category || null,
-    roleTitle || null,
-    JSON.stringify(reviewJson),
-    Date.now(),
-    c.email || null, c.phone || null, c.location || null,
-    c.linkedin || null, c.github || null, c.portfolio || null,
-    c.currentTitle || null, c.currentCompany || null,
-    Number.isFinite(c.yearsExperience) ? c.yearsExperience : null,
-    c.highestEducation || null,
-    topSkillsJson, languagesJson,
-    c.noticePeriod || null, c.expectedSalary || null,
-    filePath || null, contentType || null,
-    workLocsJson, companiesJson, domainsJson,
-    remoteWorked, remoteYears, remoteEvidence,
-    managedPeopleInt, teamSize, openToRelocInt,
-    educationJson, certsJson, publicationsInt
-  );
-  const newId = Number(info.lastInsertRowid);
-  mirrorResumeToMongo(newId);
-  return { id: newId, isNew: true };
-}
-
-// Public re-mirror trigger. Exposed so maintenance scripts (rescore.js) that
-// hit the resumes table directly with raw SQL can still push the updated row
-// into Mongo without going through insertResume.
-export function remirrorResume(resumeId) {
-  mirrorResumeToMongo(resumeId);
-}
-
-// Build a Mongo doc from the freshly-saved SQLite row and upsert it. Reads
-// the row back instead of reconstructing it from the function args so the
-// mirrored shape always matches what's actually persisted (including any
-// COALESCE'd fields on update). Fire-and-forget; never throws.
-function mirrorResumeToMongo(resumeId) {
+  const id = await nextId('resumes');
+  const doc = buildInsertDoc(id, args, fields, review);
   try {
-    const row = getDb().prepare('SELECT * FROM resumes WHERE id = ?').get(resumeId);
-    if (!row) return;
-    const doc = {
-      ...row,
-      // Decode JSON-encoded list fields so the Mongo document is queryable.
-      top_skills:     safeJsonParse(row.top_skills) || [],
-      languages:      safeJsonParse(row.languages) || [],
-      work_locations: safeJsonParse(row.work_locations) || [],
-      companies:      safeJsonParse(row.companies) || [],
-      domains:        safeJsonParse(row.domains) || [],
-      education:      safeJsonParse(row.education_json) || [],
-      certifications: safeJsonParse(row.certifications) || [],
-      remote_worked:    row.remote_worked === 1,
-      managed_people:   row.managed_people === 1,
-      open_to_relocate: row.open_to_relocate === 1,
-      publications:     row.publications === 1,
-      review:           safeJsonParse(row.review_json) || null
-    };
-    // Drop the duplicated JSON string fields; the decoded shapes above are
-    // friendlier for Mongo querying.
-    delete doc.review_json;
-    delete doc.education_json;
-    // Use the SQLite id as the Mongo _id so both stores share a primary key.
-    mongoUpsertById('resumes', resumeId, doc);
+    await db.collection('resumes').insertOne(doc);
+    return { id, isNew: true };
   } catch (err) {
-    console.warn(`[db] mirrorResumeToMongo(${resumeId}) failed: ${err.message}`);
+    // Race: a concurrent insert of the same attachment hit the unique index
+    // between our findOne and insertOne. Fall back to update.
+    if (err && err.code === 11000 && hasKey) {
+      const ex = await db.collection('resumes').findOne(
+        { email_id: args.emailId, attachment_id: args.attachmentId },
+        { projection: { _id: 1 } }
+      );
+      if (ex) {
+        await db.collection('resumes').updateOne({ _id: ex._id }, { $set: buildUpdateSet(fields, review) });
+        return { id: ex._id, isNew: false };
+      }
+    }
+    throw err;
   }
 }
 
-// Cascading resume delete: chunks + chunk_vectors stay in SQLite (vector
-// retrieval still uses them), but the resume row itself and any chat
-// threads/messages tied to it are removed from BOTH stores.
-export function deleteResume(id) {
-  const db = getDb();
-  // chunk_vectors aren't cascaded by FKs (vec0 isn't a regular table), so
-  // clean them up explicitly first.
-  db.prepare(`DELETE FROM chunk_vectors WHERE rowid IN (SELECT id FROM chunks WHERE resume_id = ?)`).run(id);
-  const info = db.prepare(`DELETE FROM resumes WHERE id = ?`).run(id);
-  // Mongo mirror: drop the resume, plus any threads + messages that pointed
-  // at it. SQLite handled this via ON DELETE CASCADE; Mongo has no FKs so we
-  // do the cascade ourselves.
-  mongoDeleteById('resumes', id);
-  mongoDeleteMany('chat_threads', { resume_id: id });
-  mongoDeleteMany('chat_messages', { resume_id: id });
-  // Pinecone mirror: drop the resume's vectors so they don't surface in
-  // future searches. Fire-and-forget -- if it fails, orphan vectors get
-  // filtered out at read time (the hydrate-from-SQLite join drops any id
-  // whose chunk row no longer exists).
-  pineconeDeleteResume(id).catch(() => {});
-  return info.changes;
+export async function deleteResume(id) {
+  const db = await getMongoDb();
+  const rid = Number(id);
+  const res = await db.collection('resumes').deleteOne({ _id: rid });
+  // Drop this resume's chunks (text lives in Mongo now).
+  await db.collection('chunks').deleteMany({ resume_id: rid });
+  // Cascade chat: messages are keyed by thread_id (not resume_id), so resolve
+  // the resume's threads first, then delete their messages and the threads.
+  const threads = await db.collection('chat_threads').find({ resume_id: rid }, { projection: { _id: 1 } }).toArray();
+  const threadIds = threads.map((t) => t._id);
+  if (threadIds.length) {
+    await db.collection('chat_messages').deleteMany({ thread_id: { $in: threadIds } });
+    await db.collection('chat_threads').deleteMany({ _id: { $in: threadIds } });
+  }
+  // Pinecone vectors: best-effort. A stale vector is harmless — hydration joins
+  // back to `chunks` by id and drops any id with no chunk doc.
+  pineconeDeleteResume(rid).catch(() => {});
+  return res.deletedCount;
 }
 
-export function listResumes() {
-  return getDb().prepare(`
-    SELECT id, filename, candidate_name, score, category, role_title, created_at
-    FROM resumes
-    ORDER BY created_at DESC
-  `).all();
+const RESUME_LIST_PROJECTION = {
+  _id: 0, id: 1, filename: 1, candidate_name: 1, score: 1, category: 1, role_title: 1, created_at: 1
+};
+
+export async function listResumes() {
+  const db = await getMongoDb();
+  return db.collection('resumes')
+    .find({}, { projection: RESUME_LIST_PROJECTION })
+    .sort({ created_at: -1 })
+    .toArray();
 }
 
 // Returns resumes grouped by category, each group sorted by score DESC.
-// Shape: [ { category, label, resumes: [...] }, ... ]
-// Categories are emitted in a fixed display order; empty ones are skipped.
-export function listResumesByCategory() {
-  const CATEGORY_ORDER = [
-    'frontend','backend','fullstack','mobile','data','ml-ai',
-    'devops','security','qa','design','product',
-    'marketing','sales','hr','other', null
-  ];
-  const CATEGORY_LABELS = {
-    frontend: 'Frontend', backend: 'Backend', fullstack: 'Full-stack',
-    mobile: 'Mobile', data: 'Data', 'ml-ai': 'ML / AI',
-    devops: 'DevOps / SRE', security: 'Security', qa: 'QA / Test',
-    design: 'Design', product: 'Product', marketing: 'Marketing',
-    sales: 'Sales', hr: 'HR', other: 'Other', null: 'Uncategorized'
-  };
+const CATEGORY_ORDER = [
+  'frontend', 'backend', 'fullstack', 'mobile', 'data', 'ml-ai',
+  'devops', 'security', 'qa', 'design', 'product',
+  'marketing', 'sales', 'hr', 'other', null
+];
+const CATEGORY_LABELS = {
+  frontend: 'Frontend', backend: 'Backend', fullstack: 'Full-stack',
+  mobile: 'Mobile', data: 'Data', 'ml-ai': 'ML / AI',
+  devops: 'DevOps / SRE', security: 'Security', qa: 'QA / Test',
+  design: 'Design', product: 'Product', marketing: 'Marketing',
+  sales: 'Sales', hr: 'HR', other: 'Other', null: 'Uncategorized'
+};
 
-  const rows = getDb().prepare(`
-    SELECT id, filename, candidate_name, score, category, role_title, created_at
-    FROM resumes
-    ORDER BY COALESCE(score, 0) DESC, created_at DESC
-  `).all();
+export async function listResumesByCategory() {
+  const db = await getMongoDb();
+  const rows = await db.collection('resumes')
+    .find({}, { projection: RESUME_LIST_PROJECTION })
+    .toArray();
+  // Sort by score desc (treating missing as 0), then created_at desc.
+  rows.sort((a, b) => (b.score ?? 0) - (a.score ?? 0) || (b.created_at ?? 0) - (a.created_at ?? 0));
 
   const buckets = new Map();
   for (const r of rows) {
@@ -464,359 +218,246 @@ export function listResumesByCategory() {
   return groups;
 }
 
-export function getResume(id) {
-  const row = getDb().prepare('SELECT * FROM resumes WHERE id = ?').get(id);
+export async function getResume(id) {
+  const db = await getMongoDb();
+  const row = await db.collection('resumes').findOne({ _id: Number(id) });
   if (!row) return null;
-  return { ...row, review: JSON.parse(row.review_json) };
+  return { ...row, review: row.review || null };
 }
 
-// Cache-lookup for /score: same (email_id, attachment_id) means same file
-// bytes from the same message, so the prior AI review is still valid. Used to
-// skip the expensive scoreResume() LLM call when the auto-poller re-sends an
-// attachment we've already processed.
-export function getResumeByEmailAttachment(emailId, attachmentId) {
+// Cache-lookup for /score: same (email_id, attachment_id) means same bytes, so
+// the prior AI review is still valid (skips the expensive LLM call).
+export async function getResumeByEmailAttachment(emailId, attachmentId) {
   if (!emailId || !attachmentId) return null;
-  const row = getDb().prepare(
-    'SELECT * FROM resumes WHERE email_id = ? AND attachment_id = ?'
-  ).get(emailId, attachmentId);
+  const db = await getMongoDb();
+  const row = await db.collection('resumes').findOne({ email_id: emailId, attachment_id: attachmentId });
   if (!row) return null;
-  return { ...row, review: JSON.parse(row.review_json) };
+  return { ...row, review: row.review || null };
 }
 
-// Full rows for spreadsheet export. Returns rows in score-desc order so the
-// exported sheet ranks candidates from best to worst.
-export function listResumesForExport() {
-  const rows = getDb().prepare(`
-    SELECT id, filename, candidate_name, score, category, role_title, created_at,
-           email, phone, location, linkedin, github, portfolio,
-           current_title, current_company, years_experience, highest_education,
-           top_skills, languages, notice_period, expected_salary,
-           file_path, content_type, email_id
-    FROM resumes
-    ORDER BY COALESCE(score, 0) DESC, created_at DESC
-  `).all();
+// Full rows for spreadsheet export, score-desc. Projects review + raw_text too
+// so the export route doesn't need a per-row getResume() (avoids an N+1).
+export async function listResumesForExport() {
+  const db = await getMongoDb();
+  const rows = await db.collection('resumes').find({}, {
+    projection: {
+      _id: 0, id: 1, filename: 1, candidate_name: 1, score: 1, category: 1, role_title: 1, created_at: 1,
+      email: 1, phone: 1, location: 1, linkedin: 1, github: 1, portfolio: 1,
+      current_title: 1, current_company: 1, years_experience: 1, highest_education: 1,
+      top_skills: 1, languages: 1, notice_period: 1, expected_salary: 1,
+      file_path: 1, content_type: 1, email_id: 1, raw_text: 1, review: 1
+    }
+  }).toArray();
+  rows.sort((a, b) => (b.score ?? 0) - (a.score ?? 0) || (b.created_at ?? 0) - (a.created_at ?? 0));
   return rows.map((r) => ({
     ...r,
-    top_skills: safeJsonParse(r.top_skills) || [],
-    languages: safeJsonParse(r.languages) || []
+    top_skills: Array.isArray(r.top_skills) ? r.top_skills : [],
+    languages: Array.isArray(r.languages) ? r.languages : []
   }));
 }
 
-function safeJsonParse(s) {
-  if (!s) return null;
-  try { return JSON.parse(s); } catch { return null; }
-}
-
-export function getResumeSummaries(ids) {
+export async function getResumeSummaries(ids) {
   if (!ids || ids.length === 0) return [];
-  const placeholders = ids.map(() => '?').join(',');
-  return getDb().prepare(`
-    SELECT id, filename, candidate_name, score, review_json
-    FROM resumes WHERE id IN (${placeholders})
-  `).all(...ids).map((r) => ({
+  const db = await getMongoDb();
+  const rows = await db.collection('resumes')
+    .find({ _id: { $in: ids.map(Number) } },
+      { projection: { _id: 0, id: 1, filename: 1, candidate_name: 1, score: 1, review: 1 } })
+    .toArray();
+  return rows.map((r) => ({
     id: r.id, filename: r.filename, candidate_name: r.candidate_name, score: r.score,
-    review: JSON.parse(r.review_json)
+    review: r.review || null
   }));
 }
 
-export function getAllResumesForChat() {
-  return getDb().prepare(`
-    SELECT id, filename, candidate_name, score, review_json
-    FROM resumes
-  `).all().map((r) => ({
+export async function getAllResumesForChat() {
+  const db = await getMongoDb();
+  const rows = await db.collection('resumes')
+    .find({}, { projection: { _id: 0, id: 1, filename: 1, candidate_name: 1, score: 1, review: 1 } })
+    .toArray();
+  return rows.map((r) => ({
     id: r.id, filename: r.filename, candidate_name: r.candidate_name, score: r.score,
-    review: JSON.parse(r.review_json)
+    review: r.review || null
   }));
+}
+
+// Full enriched profiles for a set of resumes (chat context). Docs are already
+// in the decoded shape (arrays/booleans/review object).
+export async function getResumeProfiles(ids) {
+  if (!ids || ids.length === 0) return [];
+  const db = await getMongoDb();
+  const rows = await db.collection('resumes').find({ _id: { $in: ids.map(Number) } }).toArray();
+  return rows.map((r) => ({ ...r, review: r.review || null }));
 }
 
 // ---------------------------------------------------------------------------
-// Chunk + vector insertion (called as one transaction per resume)
+// Chunk insertion. Embeddings go to Pinecone (handled in rag.js); this stores
+// the text + ids. Returns the chunk ids so the caller can mirror them into
+// Pinecone as vector ids.
 
-export function replaceChunksForResume(resumeId, chunksWithEmbeddings) {
-  const db = getDb();
-  const deleteOldChunks = db.prepare('DELETE FROM chunks WHERE resume_id = ?');
-  const deleteOldVectors = db.prepare(`
-    DELETE FROM chunk_vectors WHERE rowid IN (SELECT id FROM chunks WHERE resume_id = ?)
-  `);
-  const insertChunk = db.prepare(`
-    INSERT INTO chunks (resume_id, chunk_index, text) VALUES (?, ?, ?)
-  `);
-  const insertVector = db.prepare(`
-    INSERT INTO chunk_vectors (rowid, embedding) VALUES (?, ?)
-  `);
-
-  // Collect the SQLite chunk row IDs as we go so the caller (rag.js) can
-  // mirror the same IDs into Pinecone -- both stores share a primary key,
-  // which is what lets the Pinecone read path hydrate text via a SQLite
-  // lookup by id.
+export async function replaceChunksForResume(resumeId, items) {
+  const db = await getMongoDb();
+  const rid = Number(resumeId);
+  await db.collection('chunks').deleteMany({ resume_id: rid });
   const chunkIds = [];
-  const tx = db.transaction((rid, items) => {
-    deleteOldVectors.run(rid);
-    deleteOldChunks.run(rid);
-    for (let i = 0; i < items.length; i++) {
-      const { text, embedding } = items[i];
-      const info = insertChunk.run(rid, i, text);
-      // sqlite-vec's vec0 virtual table only accepts INTEGER-typed bindings
-      // for rowid. better-sqlite3 binds JS Number as REAL here, which vec0
-      // rejects ("Only integers are allows ... on chunk_vectors"). BigInt
-      // forces SQLITE_INTEGER binding.
-      insertVector.run(BigInt(info.lastInsertRowid), floatsToBlob(embedding));
-      chunkIds.push(Number(info.lastInsertRowid));
-    }
-  });
-  tx(resumeId, chunksWithEmbeddings);
+  const docs = [];
+  for (let i = 0; i < items.length; i++) {
+    const id = await nextId('chunks');
+    chunkIds.push(id);
+    docs.push({ _id: id, id, resume_id: rid, chunk_index: i, text: items[i].text });
+  }
+  if (docs.length) await db.collection('chunks').insertMany(docs);
   return chunkIds;
 }
 
-// ---------------------------------------------------------------------------
-// Vector search
-//
-// We use a plain join with vec_distance_cosine. sqlite-vec also supports
-// `WHERE embedding MATCH ? AND k = ?` for ANN, but that path doesn't
-// compose cleanly with a resume_id filter. At MVP scale (<10k chunks) a
-// full scan is well under 100ms.
-
-export function searchChunks({ queryEmbedding, topK = 8, resumeId = null }) {
-  const db = getDb();
-  const blob = floatsToBlob(queryEmbedding);
-
-  if (resumeId != null) {
-    return db.prepare(`
-      SELECT
-        c.id           AS chunk_id,
-        c.resume_id    AS resume_id,
-        c.chunk_index  AS chunk_index,
-        c.text         AS text,
-        r.candidate_name, r.filename, r.score,
-        vec_distance_cosine(v.embedding, ?) AS distance
-      FROM chunk_vectors v
-      JOIN chunks  c ON c.id = v.rowid
-      JOIN resumes r ON r.id = c.resume_id
-      WHERE c.resume_id = ?
-      ORDER BY distance ASC
-      LIMIT ?
-    `).all(blob, resumeId, topK);
-  }
-
-  return db.prepare(`
-    SELECT
-      c.id           AS chunk_id,
-      c.resume_id    AS resume_id,
-      c.chunk_index  AS chunk_index,
-      c.text         AS text,
-      r.candidate_name, r.filename, r.score,
-      vec_distance_cosine(v.embedding, ?) AS distance
-    FROM chunk_vectors v
-    JOIN chunks  c ON c.id = v.rowid
-    JOIN resumes r ON r.id = c.resume_id
-    ORDER BY distance ASC
-    LIMIT ?
-  `).all(blob, topK);
-}
-
-// Hydrate chunk rows by id, preserving the input order. Used by the Pinecone
-// read path: Pinecone returns ranked chunk_ids, and we look the texts +
-// resume metadata back up locally. Returns the same shape as searchChunks()
-// so the RRF merger can treat both result sets uniformly. Any id that no
-// longer has a chunk row (e.g. resume was deleted and Pinecone hasn't yet
-// caught up) is silently dropped.
-export function hydrateChunksByIds(orderedIds) {
+// Hydrate chunk rows by id, preserving the input order (Pinecone rank). Any id
+// with no chunk doc is dropped (orphan filter).
+export async function hydrateChunksByIds(orderedIds) {
   if (!orderedIds || orderedIds.length === 0) return [];
-  const db = getDb();
-  const placeholders = orderedIds.map(() => '?').join(',');
-  const rows = db.prepare(`
-    SELECT
-      c.id           AS chunk_id,
-      c.resume_id    AS resume_id,
-      c.chunk_index  AS chunk_index,
-      c.text         AS text,
-      r.candidate_name, r.filename, r.score
-    FROM chunks c
-    JOIN resumes r ON r.id = c.resume_id
-    WHERE c.id IN (${placeholders})
-  `).all(...orderedIds);
+  const db = await getMongoDb();
+  const ids = orderedIds.map(Number);
+  const rows = await db.collection('chunks').aggregate([
+    { $match: { _id: { $in: ids } } },
+    { $lookup: { from: 'resumes', localField: 'resume_id', foreignField: '_id', as: '_r' } },
+    { $addFields: { _r: { $arrayElemAt: ['$_r', 0] } } },
+    { $project: {
+        _id: 0, chunk_id: '$_id', resume_id: 1, chunk_index: 1, text: 1,
+        candidate_name: '$_r.candidate_name', filename: '$_r.filename', score: '$_r.score'
+      } }
+  ]).toArray();
   const byId = new Map(rows.map((r) => [r.chunk_id, r]));
-  return orderedIds.map((id) => byId.get(id)).filter(Boolean);
+  return ids.map((id) => byId.get(id)).filter(Boolean);
 }
 
 // ---------------------------------------------------------------------------
-// BM25 / keyword search over chunks (L4). FTS5 MATCH on the porter-tokenized
-// virtual table. Returns the same shape as searchChunks() so the merger can
-// treat both result sets uniformly.
+// BM25 / keyword search over chunks via Mongo's $text index. Returns the same
+// shape as hydrateChunksByIds() so the RRF merger treats both signals uniformly.
 
-export function searchChunksBM25({ query, topK = 10, resumeId = null }) {
+export async function searchChunksBM25({ query, topK = 10, resumeId = null }) {
   if (!query || !query.trim()) return [];
-  const db = getDb();
-  const ftsQuery = ftsSafeQuery(query);
-  if (!ftsQuery) return [];
-
-  if (resumeId != null) {
-    return db.prepare(`
-      SELECT
-        c.id           AS chunk_id,
-        c.resume_id    AS resume_id,
-        c.chunk_index  AS chunk_index,
-        c.text         AS text,
-        r.candidate_name, r.filename, r.score,
-        bm25(chunks_fts) AS rank_score
-      FROM chunks_fts
-      JOIN chunks  c ON c.id = chunks_fts.rowid
-      JOIN resumes r ON r.id = c.resume_id
-      WHERE chunks_fts MATCH ? AND c.resume_id = ?
-      ORDER BY rank_score ASC
-      LIMIT ?
-    `).all(ftsQuery, resumeId, topK);
-  }
-
-  return db.prepare(`
-    SELECT
-      c.id           AS chunk_id,
-      c.resume_id    AS resume_id,
-      c.chunk_index  AS chunk_index,
-      c.text         AS text,
-      r.candidate_name, r.filename, r.score,
-      bm25(chunks_fts) AS rank_score
-    FROM chunks_fts
-    JOIN chunks  c ON c.id = chunks_fts.rowid
-    JOIN resumes r ON r.id = c.resume_id
-    WHERE chunks_fts MATCH ?
-    ORDER BY rank_score ASC
-    LIMIT ?
-  `).all(ftsQuery, topK);
+  const terms = mongoTextQuery(query);
+  if (!terms) return [];
+  const db = await getMongoDb();
+  const match = { $text: { $search: terms } };
+  if (resumeId != null) match.resume_id = Number(resumeId);
+  return db.collection('chunks').aggregate([
+    { $match: match },
+    { $addFields: { _score: { $meta: 'textScore' } } },
+    { $sort: { _score: -1 } },
+    { $limit: topK },
+    { $lookup: { from: 'resumes', localField: 'resume_id', foreignField: '_id', as: '_r' } },
+    { $addFields: { _r: { $arrayElemAt: ['$_r', 0] } } },
+    { $project: {
+        _id: 0, chunk_id: '$_id', resume_id: 1, chunk_index: 1, text: 1,
+        candidate_name: '$_r.candidate_name', filename: '$_r.filename', score: '$_r.score'
+      } }
+  ]).toArray();
 }
 
-// FTS5's query syntax has reserved characters (* " : ( ) etc) that throw
-// "fts5: syntax error" if passed raw. Strip them, split on whitespace, drop
-// stopword-y short tokens, and OR the rest together. Returns '' if nothing
-// useful remains -- caller treats as "no BM25 hits".
-function ftsSafeQuery(q) {
+// Tokenize a free-text query into bare terms for Mongo $text (which ORs
+// space-separated terms). Strips reserved chars, drops short/stopword tokens.
+// Returns '' if nothing useful remains.
+function mongoTextQuery(q) {
   const tokens = String(q)
     .toLowerCase()
-    .replace(/[^a-z0-9\s+#./-]/g, ' ')   // keep letters/digits + a few skill-y chars
+    .replace(/[^a-z0-9\s+#./-]/g, ' ')
     .split(/\s+/)
     .filter((t) => t.length >= 2)
     .filter((t) => !FTS_STOPWORDS.has(t))
-    .slice(0, 12);                        // cap to keep query small
-  if (tokens.length === 0) return '';
-  // Quote each token so things like "node.js" don't trip the parser.
-  return tokens.map((t) => `"${t}"`).join(' OR ');
+    .slice(0, 12);
+  return tokens.join(' ');
 }
 
 const FTS_STOPWORDS = new Set([
-  'a','an','the','and','or','but','of','for','with','to','in','on','at','by',
-  'is','are','was','were','be','been','being','i','me','my','we','our','you',
-  'who','whom','that','this','these','those','it','its','as','from','do','does',
-  'did','have','has','had','can','could','should','would','will','show','find',
-  'give','list','need','want','one','someone','person','people','candidate',
-  'candidates','resume','resumes','please','any','about','tell','what','which',
-  'where','how','many','some','more','less','than','then','also','etc'
+  'a', 'an', 'the', 'and', 'or', 'but', 'of', 'for', 'with', 'to', 'in', 'on', 'at', 'by',
+  'is', 'are', 'was', 'were', 'be', 'been', 'being', 'i', 'me', 'my', 'we', 'our', 'you',
+  'who', 'whom', 'that', 'this', 'these', 'those', 'it', 'its', 'as', 'from', 'do', 'does',
+  'did', 'have', 'has', 'had', 'can', 'could', 'should', 'would', 'will', 'show', 'find',
+  'give', 'list', 'need', 'want', 'one', 'someone', 'person', 'people', 'candidate',
+  'candidates', 'resume', 'resumes', 'please', 'any', 'about', 'tell', 'what', 'which',
+  'where', 'how', 'many', 'some', 'more', 'less', 'than', 'then', 'also', 'etc'
 ]);
-
-// Returns the FULL enriched profile for a set of resumes. Used by chat to
-// inject structured data into the LLM context alongside retrieved chunks.
-export function getResumeProfiles(ids) {
-  if (!ids || ids.length === 0) return [];
-  const placeholders = ids.map(() => '?').join(',');
-  return getDb().prepare(`
-    SELECT id, filename, candidate_name, score, category, role_title,
-           email, phone, location, linkedin, github, portfolio,
-           current_title, current_company, years_experience, highest_education,
-           top_skills, languages, notice_period, expected_salary,
-           work_locations, companies, domains,
-           remote_worked, remote_years, remote_evidence,
-           managed_people, team_size_managed, open_to_relocate,
-           education_json, certifications, publications,
-           review_json
-    FROM resumes WHERE id IN (${placeholders})
-  `).all(...ids).map(decodeProfile);
-}
-
-function decodeProfile(r) {
-  if (!r) return r;
-  return {
-    ...r,
-    top_skills:     safeJsonParse(r.top_skills) || [],
-    languages:      safeJsonParse(r.languages) || [],
-    work_locations: safeJsonParse(r.work_locations) || [],
-    companies:      safeJsonParse(r.companies) || [],
-    domains:        safeJsonParse(r.domains) || [],
-    education:      safeJsonParse(r.education_json) || [],
-    certifications: safeJsonParse(r.certifications) || [],
-    remote_worked:    r.remote_worked === 1,
-    managed_people:   r.managed_people === 1,
-    open_to_relocate: r.open_to_relocate === 1,
-    publications:     r.publications === 1,
-    review:           safeJsonParse(r.review_json) || null
-  };
-}
 
 // ---------------------------------------------------------------------------
 // Chat threads + messages
 
-export function createThread({ resumeId = null, title = null }) {
-  const createdAt = Date.now();
-  const info = getDb().prepare(`
-    INSERT INTO chat_threads (resume_id, title, created_at) VALUES (?, ?, ?)
-  `).run(resumeId, title, createdAt);
-  const id = Number(info.lastInsertRowid);
-  mongoUpsertById('chat_threads', id, {
-    id, resume_id: resumeId, title, created_at: createdAt
+export async function createThread({ resumeId = null, title = null }) {
+  const db = await getMongoDb();
+  const id = await nextId('chat_threads');
+  const created_at = Date.now();
+  await db.collection('chat_threads').insertOne({
+    _id: id, id, resume_id: resumeId == null ? null : Number(resumeId), title, created_at
   });
   return id;
 }
 
-// Delete a thread + cascade its messages. Mongo doesn't auto-cascade so we
-// remove the messages explicitly.
-export function deleteThread(id) {
-  const info = getDb().prepare('DELETE FROM chat_threads WHERE id = ?').run(id);
-  mongoDeleteById('chat_threads', id);
-  mongoDeleteMany('chat_messages', { thread_id: id });
-  return info.changes;
+export async function deleteThread(id) {
+  const db = await getMongoDb();
+  const tid = Number(id);
+  const res = await db.collection('chat_threads').deleteOne({ _id: tid });
+  await db.collection('chat_messages').deleteMany({ thread_id: tid });
+  return res.deletedCount;
 }
 
-export function listThreads() {
-  return getDb().prepare(`
-    SELECT
-      t.id, t.resume_id, t.title, t.created_at,
-      r.candidate_name, r.filename,
-      (SELECT content FROM chat_messages WHERE thread_id = t.id ORDER BY id DESC LIMIT 1) AS last_message
-    FROM chat_threads t
-    LEFT JOIN resumes r ON r.id = t.resume_id
-    ORDER BY t.created_at DESC
-  `).all();
+export async function listThreads() {
+  const db = await getMongoDb();
+  return db.collection('chat_threads').aggregate([
+    { $sort: { created_at: -1 } },
+    { $lookup: { from: 'resumes', localField: 'resume_id', foreignField: '_id', as: '_r' } },
+    { $addFields: { _r: { $arrayElemAt: ['$_r', 0] } } },
+    { $lookup: {
+        from: 'chat_messages',
+        let: { tid: '$_id' },
+        pipeline: [
+          { $match: { $expr: { $eq: ['$thread_id', '$$tid'] } } },
+          { $sort: { id: -1 } },
+          { $limit: 1 },
+          { $project: { _id: 0, content: 1 } }
+        ],
+        as: '_last'
+      } },
+    { $project: {
+        _id: 0, id: '$_id', resume_id: 1, title: 1, created_at: 1,
+        candidate_name: '$_r.candidate_name', filename: '$_r.filename',
+        last_message: { $ifNull: [{ $arrayElemAt: ['$_last.content', 0] }, null] }
+      } }
+  ]).toArray();
 }
 
-export function getThread(id) {
-  return getDb().prepare(`
-    SELECT t.*, r.candidate_name, r.filename
-    FROM chat_threads t
-    LEFT JOIN resumes r ON r.id = t.resume_id
-    WHERE t.id = ?
-  `).get(id);
+export async function getThread(id) {
+  const db = await getMongoDb();
+  const rows = await db.collection('chat_threads').aggregate([
+    { $match: { _id: Number(id) } },
+    { $lookup: { from: 'resumes', localField: 'resume_id', foreignField: '_id', as: '_r' } },
+    { $addFields: { _r: { $arrayElemAt: ['$_r', 0] } } },
+    { $project: {
+        _id: 0, id: '$_id', resume_id: 1, title: 1, created_at: 1,
+        candidate_name: '$_r.candidate_name', filename: '$_r.filename'
+      } }
+  ]).toArray();
+  return rows[0] || null;
 }
 
-export function appendMessage({ threadId, role, content }) {
-  const createdAt = Date.now();
-  const info = getDb().prepare(`
-    INSERT INTO chat_messages (thread_id, role, content, created_at) VALUES (?, ?, ?, ?)
-  `).run(threadId, role, content, createdAt);
-  const id = Number(info.lastInsertRowid);
-  mongoUpsertById('chat_messages', id, {
-    id, thread_id: threadId, role, content, created_at: createdAt
+export async function appendMessage({ threadId, role, content }) {
+  const db = await getMongoDb();
+  const id = await nextId('chat_messages');
+  const created_at = Date.now();
+  await db.collection('chat_messages').insertOne({
+    _id: id, id, thread_id: Number(threadId), role, content, created_at
   });
   return id;
 }
 
-export function getMessages(threadId, { limit = 50 } = {}) {
-  return getDb().prepare(`
-    SELECT id, role, content, created_at FROM chat_messages
-    WHERE thread_id = ?
-    ORDER BY id ASC
-    LIMIT ?
-  `).all(threadId, limit);
+export async function getMessages(threadId, { limit = 50 } = {}) {
+  const db = await getMongoDb();
+  return db.collection('chat_messages')
+    .find({ thread_id: Number(threadId) },
+      { projection: { _id: 0, id: 1, role: 1, content: 1, created_at: 1 } })
+    .sort({ id: 1 })
+    .limit(limit)
+    .toArray();
 }
 
-export function setThreadTitle(threadId, title) {
-  getDb().prepare('UPDATE chat_threads SET title = ? WHERE id = ?').run(title, threadId);
-  mongoUpdateById('chat_threads', threadId, { title });
+export async function setThreadTitle(threadId, title) {
+  const db = await getMongoDb();
+  await db.collection('chat_threads').updateOne({ _id: Number(threadId) }, { $set: { title } });
 }

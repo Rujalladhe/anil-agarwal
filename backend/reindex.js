@@ -1,21 +1,18 @@
-// One-shot maintenance script: rebuild the chunk_vectors table at the
-// CURRENT EMBED_DIM and re-embed every resume's chunks.
+// One-shot maintenance script: re-chunk + re-embed every resume, writing chunk
+// text to Mongo and vectors to Pinecone.
 //
 // Run this:
-//   - the first time, after switching EMBED_PROVIDER (e.g. google -> local)
-//     because sqlite-vec virtual tables fix dimension at CREATE time
-//   - any time you wipe / corrupt the chunks table
-//   - whenever resumes were inserted while embeddings were misconfigured
-//     (you'll see those resumes in /resumes but with 0 chunks)
+//   - after switching EMBED_PROVIDER / EMBED_DIM (vectors must match the new dim)
+//   - whenever resumes show up in /resumes with 0 chunks (embeddings were
+//     misconfigured when they were scored)
 //
 // Usage:  node reindex.js
 //
-// Safe to run while the dev server is up: it's just SQL + embedding calls.
-// If you have a running server, you may want to restart it afterwards so
-// it picks up the fresh vec0 table cleanly.
+// indexResume() deletes the resume's existing Mongo chunks and Pinecone vectors
+// before writing fresh ones, so this is safe to re-run.
 
 import 'dotenv/config';
-import { getDb } from './db.js';
+import { getMongoDb, closeMongo } from './mongo.js';
 import { indexResume } from './rag.js';
 import { getEmbedConfig } from './embeddings.js';
 
@@ -23,15 +20,11 @@ async function main() {
   const cfg = getEmbedConfig();
   console.log(`[reindex] embed provider=${cfg.provider} model=${cfg.model} dim=${cfg.dim}`);
 
-  const db = getDb();
-
-  // Drop + recreate the vec0 virtual table at the current dim. This wipes
-  // any vectors that were stored at a different dim.
-  db.exec('DROP TABLE IF EXISTS chunk_vectors;');
-  db.exec(`CREATE VIRTUAL TABLE chunk_vectors USING vec0(embedding FLOAT[${cfg.dim}]);`);
-  db.exec('DELETE FROM chunks;');
-
-  const resumes = db.prepare('SELECT id, candidate_name, filename, raw_text FROM resumes ORDER BY id').all();
+  const db = await getMongoDb();
+  const resumes = await db.collection('resumes')
+    .find({}, { projection: { _id: 0, id: 1, candidate_name: 1, filename: 1, raw_text: 1 } })
+    .sort({ id: 1 })
+    .toArray();
   console.log(`[reindex] re-indexing ${resumes.length} resumes...`);
 
   for (const r of resumes) {
@@ -45,6 +38,7 @@ async function main() {
     }
   }
 
+  await closeMongo();
   console.log('[reindex] done.');
 }
 

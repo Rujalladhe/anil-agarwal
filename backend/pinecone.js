@@ -1,11 +1,11 @@
-// Pinecone vector store — runs as PRIMARY for vector search when configured,
-// with sqlite-vec kept as a hot backup (dual-write + read-fallback). Designed
-// so the rest of the app works unchanged whether Pinecone is on or off:
+// Pinecone vector store — the ONLY vector store. Chunk TEXT lives in Mongo;
+// the embeddings live here, keyed by chunk id (so the two stores share a
+// primary key and a Pinecone hit hydrates its text from Mongo by id).
 //
 //   - PINECONE_API_KEY unset  -> isPineconeEnabled() === false, every helper
-//     in this file becomes a no-op. Existing sqlite-vec path is untouched.
-//   - PINECONE_API_KEY set    -> writes go to both stores, reads prefer
-//     Pinecone but transparently fall back to sqlite-vec on any error.
+//     becomes a no-op and the vector signal returns nothing (chat still works
+//     via the Mongo BM25 signal).
+//   - PINECONE_API_KEY set    -> writes upsert here; reads query here.
 //
 // Index is auto-created on first use (free-tier serverless: aws/us-east-1,
 // cosine, dim from EMBED_DIM). Lazy init keeps server boot fast and avoids
@@ -33,7 +33,7 @@ export function isPineconeEnabled() {
 // the right dimension, and returns a per-namespace index handle. Subsequent
 // calls hit the memoized promise. If init fails (bad key, network down, dim
 // mismatch) we set _disabledReason so isPineconeEnabled() flips off and the
-// rest of the app cleanly falls back to sqlite-vec.
+// vector signal returns nothing (chat still works via the Mongo BM25 signal).
 async function getIndex() {
   if (_clientPromise) return _clientPromise;
   _clientPromise = (async () => {
@@ -76,11 +76,11 @@ async function getIndex() {
 
 // Upsert one resume's chunk vectors. `items` is the same array
 // replaceChunksForResume already builds; `chunkIds` is the parallel list of
-// SQLite chunk row IDs (used as Pinecone vector IDs so the two stores share
-// a primary key).
+// Mongo chunk ids (used as Pinecone vector IDs so the two stores share a
+// primary key).
 //
-// Caller should await this AFTER the sqlite-vec write has succeeded so a
-// Pinecone failure here can't roll back the local source of truth.
+// Caller should await this AFTER the Mongo chunk write has succeeded so a
+// Pinecone failure here can't get ahead of the source of truth.
 export async function upsertResumeChunks(resumeId, chunkIds, items) {
   if (!isPineconeEnabled()) return;
   if (!chunkIds.length) return;
@@ -110,20 +110,20 @@ export async function deleteResumeVectors(resumeId) {
     const idx = await getIndex();
     await idx.deleteMany({ resume_id: { $eq: Number(resumeId) } });
   } catch (err) {
-    // Don't throw -- the SQLite cascade has already happened, so the user's
+    // Don't throw -- the Mongo cascade has already happened, so the user's
     // delete-resume request succeeded. A stale vector in Pinecone is
     // harmless: subsequent searches join back to `chunks` via chunk_id and
-    // any orphan IDs are filtered out (no chunk row = dropped from results).
+    // any orphan IDs are filtered out (no chunk doc = dropped from results).
     console.warn(`[pinecone] deleteResumeVectors(${resumeId}) failed: ${err.message}`);
   }
 }
 
 // Query Pinecone for the top-K nearest chunks. Returns an array of
 // { chunk_id, score } in best-first order; the caller hydrates text +
-// resume metadata from SQLite by chunk_id (single IN-list query).
+// resume metadata from Mongo by chunk_id (single $in query).
 //
-// Returns null on any failure so the caller can transparently fall back
-// to sqlite-vec without a try/catch on every code path.
+// Returns null on any failure so the caller can treat it as "no vector
+// hits" without a try/catch on every code path.
 export async function queryNearestChunkIds({ queryEmbedding, topK = 10, resumeId = null }) {
   if (!isPineconeEnabled()) return null;
   try {
@@ -143,7 +143,7 @@ export async function queryNearestChunkIds({ queryEmbedding, topK = 10, resumeId
       score: m.score
     }));
   } catch (err) {
-    console.warn(`[pinecone] query failed, falling back to sqlite-vec: ${err.message}`);
+    console.warn(`[pinecone] query failed, returning no vector hits: ${err.message}`);
     return null;
   }
 }
